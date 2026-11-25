@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Animal Kart</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="game"></div>
+
+  <!-- 왼쪽 열: 메인 메뉴 + 차고 (화면이 작으면 스크롤) -->
+  <div id="leftCol">
+  <form id="menu" class="panel" autocomplete="off">
+    <div>
+      <h1>ANIMAL<span>KART</span></h1>
+      <p class="sub">동물 친구들의 멀티플레이 카트 레이싱</p>
+      <label>닉네임<input id="name" maxlength="16" placeholder="Racer" /></label>
+      <label>방 코드<input id="room" maxlength="16" placeholder="비워두면 기본 방(main)" /></label>
+      <div class="btnRow">
+        <button type="submit" id="joinBtn">멀티플레이 입장</button>
+        <button type="button" id="practiceBtn" class="ghost">🤖 AI 봇과 연습</button>
+      </div>
+      <p id="menuMsg" class="msg"></p>
+      <div class="help">
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / 방향키 주행</div>
+        <div><kbd>Shift</kbd>+방향키 드리프트 → 게이지 충전</div>
+        <div><kbd>Space</kbd> 부스터 · <kbd>Z</kbd> 아이템 · <kbd>R</kbd> 리스폰 · <kbd>M</kbd> 소리</div>
+      </div>
+    </div>
+  </form>
+
+  <!-- 차고: 캐릭터 / 카트 색 선택 -->
+  <div id="garage" class="panel">
+    <div class="glabel">캐릭터</div>
+    <div id="charGrid"></div>
+    <div class="glabel">카트 색상</div>
+    <div id="colorRow"></div>
+    <div class="settingsRow">
+      <label for="steerSens">조향 <b id="steerVal">100%</b><input type="range" id="steerSens" min="60" max="140" step="10" value="100" /></label>
+      <label for="musicVol">🎵 음악 <b id="musicVal">50%</b><input type="range" id="musicVol" min="0" max="100" step="10" value="50" /></label>
+      <label for="sfxVol">🔊 효과음 <b id="sfxVal">80%</b><input type="range" id="sfxVol" min="0" max="100" step="10" value="80" /></label>
+    </div>
+  </div>
+  </div>
+
+  <!-- 로비 -->
+  <div id="lobby" class="panel side hidden">
+    <h2>로비 <span class="room">#<span id="roomCode"></span></span></h2>
+    <button id="startBtn" class="hidden">🏁 레이스 시작</button>
+    <p id="lobbyMsg" class="msg"></p>
+    <ul id="playerList"></ul>
+    <button id="copyLink" class="ghost">🔗 초대 링크 복사</button>
+  </div>
+
+  <!-- 레이스 HUD -->
+  <div id="hud" class="hidden">
+    <div id="hudInfo">
+      <div id="posText" class="big">1<small>/1</small></div>
+      <div id="lapText">LAP 1/3</div>
+      <div id="timeText">0:00.000</div>
+      <div id="pingText"></div>
+    </div>
+    <div id="standings"></div>
+    <canvas id="minimap" width="200" height="200"></canvas>
+    <div id="speedo"><span id="speedText">0</span><small>km/h</small></div>
+    <div id="wrongWay" class="hidden">⚠ 역주행</div>
+    <div id="itemSlot"><span id="itemIcon"></span><b id="itemName"></b><kbd>Z</kbd></div>
+    <div id="itemSlot2" title="다음 아이템"><span id="itemIcon2"></span></div>
+    <div id="zoneBanner"></div>
+    <div id="missileWarn" class="hidden">🚀 미사일 경고!<small>바나나를 뒤에 두거나 점프대에서 뜨면 피할 수 있어요</small></div>
+    <div id="boostBox">
+      <div id="items"><span class="item">🔥</span><span class="item">🔥</span></div>
+      <div id="gauge"><div id="gaugeFill"></div></div>
+      <div class="hint"><kbd>Shift</kbd> 드리프트로 충전 · <kbd>Space</kbd> 부스터</div>
+    </div>
+  </div>
+
+  <!-- 모바일 터치 컨트롤 -->
+  <div id="touch" class="hidden">
+    <div class="pad left">
+      <button data-key="ArrowLeft">◀</button>
+      <button data-key="ArrowRight">▶</button>
+    </div>
+    <div class="pad right">
+      <button data-key="ShiftLeft" class="small">DRIFT</button>
+      <button data-key="Space" class="small boost">BOOST</button>
+      <button data-key="KeyZ" class="small item">ITEM</button>
+      <button data-key="ArrowDown">⏬</button>
+      <button data-key="ArrowUp" class="gas">⏫</button>
+    </div>
+  </div>
+
+  <div id="boostFx"></div>
+  <div id="countdown" class="hidden"></div>
+  <div id="toast"></div>
+
+  <div id="results" class="panel center hidden">
+    <h2>🏆 레이스 결과</h2>
+    <table id="resultsTable"></table>
+    <p class="msg">잠시 후 로비로 돌아갑니다…</p>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/build/three.module.js",
+        "three/addons/": "./vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

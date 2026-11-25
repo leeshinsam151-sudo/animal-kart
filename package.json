@@ -1,0 +1,21 @@
+{
+  "name": "three-racing-multiplayer",
+  "version": "1.0.0",
+  "description": "Three.js 멀티플레이 레이싱 게임",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "build:static": "node scripts/build-static.mjs",
+    "test": "node test/interp.test.mjs && node test/collision.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "three": "^0.187.0",
+    "ws": "^8.23.0"
+  }
+}
