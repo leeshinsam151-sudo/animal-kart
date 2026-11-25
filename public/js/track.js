@@ -286,6 +286,20 @@ export class Track {
       for (let c = lo; c <= hi; c += 5) { const v = bend(c); if (v < bv) { bv = v; best = c; } }
       return best;
     };
+    // 앞뒤 창 크기를 직접 정하는 버전 (대점프·낭떠러지는 비행 거리가 길어서 더 멀리까지 곧아야 함)
+    const bendW = (c, back, fwd) => {
+      const t0 = this.tangents[((Math.round(c - m(back)) % N) + N) % N];
+      let worst = 0;
+      for (let k = Math.round(c - m(back)); k <= c + m(fwd); k += 3) worst = Math.max(worst, Math.acos(Math.min(1, this.tangents[((k % N) + N) % N].dot(t0))));
+      return worst;
+    };
+    const straightestW = (lo, hi, back, fwd) => {
+      let best = lo, bv = Infinity;
+      for (let c = lo; c <= hi; c += 3) { const v = bendW(c, back, fwd); if (v < bv) { bv = v; best = c; } }
+      return Math.round(best);
+    };
+    const megaCrests = []; // 대점프대 (능선 꼭대기)
+    this.stunts = [];      // { kind: 'jump' | 'cliff', i: 시작 인덱스, a, b: 아이템 박스를 피할 구간 }
     const quiet = []; // 굴곡/기울기를 넣지 않을 구간 [시작, 끝] (점프대·동굴·고가도로 주변)
     for (const r of runs) {
       const L = r.b - r.a, at = (t) => r.a + t * L;
@@ -299,14 +313,20 @@ export class Track {
         } else {
           // 마지막 숲: 움푹 꺼진 곳 → 언덕 점프
           const c = straightest(at(0.3), at(0.6));
-          feats.push((i) => bump(i, c - m(190), m(80), -4));
+          const dip = c - m(190);
+          if (!this.stunts.some((st) => st.kind === 'cliff' && Math.abs(dip - st.i) < m(220))) feats.push((i) => bump(i, dip, m(80), -4));
           feats.push((i) => bump(i, c, m(110), 7));
           crests.push(c);
         }
       } else if (r.zone === 'glacier') {
         // 빙하 능선(+10m)을 올랐다가 얼음 동굴(-3m)로 크게 내리꽂힘
         const t0 = at(0.32), t1 = at(0.62);
-        feats.push((i) => bump(i, t0 - m(150), m(110), 10));
+        // 능선 꼭대기 = 대점프대: 스키 점프처럼 아래로 길게 날아가 동굴 입구 앞에 착지
+        const rc = straightestW(t0 - m(175), t0 - m(135), 40, 130);
+        feats.push((i) => bump(i, rc, m(120), 11));
+        megaCrests.push(rc);
+        this.stunts.push({ kind: 'jump', i: rc, a: rc - m(120), b: rc + m(140) });
+        quiet.push([rc - m(130), rc + m(90)]);
         feats.push((i) => plateau(i, t0 - m(70), t1 + m(70), m(70), -3));
         feats.push((i) => bump(i, at(0.86), m(60), 5));
         for (let i = Math.floor(t0); i < t1; i++) this.tunnel[i] = 1;
@@ -327,8 +347,16 @@ export class Track {
         feats.push((i) => bump(i, c - m(260), m(75), 6));
         feats.push((i) => bump(i, c - m(130), m(45), -3));
         feats.push((i) => bump(i, c, m(95), 10));
-        feats.push((i) => bump(i, c + m(240), m(70), 5));
         crests.push(c);
+        // 낭떠러지: 길게 올라간 블록 고원(+12m) 끝에서 20m 만에 아래로 뚝 떨어짐 → 공중으로 날아가 착지
+        const d = straightestW(Math.max(c + m(330), at(0.7)), at(0.93), 30, 90);
+        const H = 12;
+        // 내려가는 모양 (1-u)²: 가장자리에서 바로 가파르게 꺾임 → 카트가 수평으로 튀어나가 떨어짐, 바닥은 완만해서 착지가 부드러움
+        const drop = m(24);
+        const edge = (i) => (i <= d ? 1 : i >= d + drop ? 0 : (1 - (i - d) / drop) ** 2);
+        feats.push((i) => H * smoothstep(d - m(230), d - m(60), i) * edge(i));
+        this.stunts.push({ kind: 'cliff', i: d, a: d - m(60), b: d + m(90) });
+        quiet.push([d - m(240), d + m(150)]);
       } else if (r.zone === 'city') {
         // 지하로 살짝 내려갔다가 고가도로(15m)로 올라감
         const ramp = m(130);
@@ -368,7 +396,11 @@ export class Track {
 
     // 점프대: 약 6m 길이로 1.8m 솟은 쐐기
     const K = Math.max(3, Math.round(6 / sp));
-    this.ramps = crests.map((c) => ({ i0: Math.round(c) - K, i1: Math.round(c), h: 1.8 }));
+    this.ramps = crests.map((c) => ({ i0: Math.round(c) - K, i1: Math.round(c), h: 1.8, cap: 11 }));
+    // 대점프대: 약 12m 길이로 3.2m 솟음, 발사 속도 상한 16 (능선 내리막 덕분에 약 1.5초, 80~110m 비행)
+    const K2 = Math.round(12 / sp);
+    // 점프대 바로 앞 50m 는 부스터 발판 → 오르막에서 느려져도 최고 속도로 날아감
+    for (const c of megaCrests) this.ramps.push({ i0: c - K2, i1: c, h: 3.2, cap: 16, mega: true, pad: Math.round(50 / sp) });
   }
 
   /** 소수 인덱스 f 에서의 커브 기울기 (lateral 1m 당 높이 변화) */
@@ -395,6 +427,24 @@ export class Track {
     if (Math.abs(lateral) > ROAD_HALF + 0.5) return 0;
     for (const r of this.ramps) if (f >= r.i0 && f <= r.i1) return (r.h * (f - r.i0)) / (r.i1 - r.i0);
     return 0;
+  }
+
+  /** 점프대 위나 막 떠난 직후라면 그 점프대의 발사 속도 상한 (아니면 null) */
+  launchCapAt(f, lateral) {
+    if (Math.abs(lateral) > ROAD_HALF + 0.5) return null;
+    for (const r of this.ramps) if (f >= r.i0 && f <= r.i1 + 5) return r.cap;
+    return null;
+  }
+
+  /** 대점프대 앞 부스터 발판 위인가 */
+  boostPadAt(f, lateral) {
+    if (Math.abs(lateral) > ROAD_HALF) return false;
+    return this.ramps.some((r) => r.mega && f >= r.i0 - r.pad && f < r.i0);
+  }
+
+  /** index 근처(앞뒤 range 샘플)의 스턴트 구간 */
+  stuntNear(index, range = 30) {
+    return this.stunts.find((st) => Math.abs(index - st.i) < range) || null;
   }
 
   /** 지면 경사 (도로 + 점프대 오르막), 트랙 진행 방향 기준 dh/ds */
@@ -452,7 +502,7 @@ export class Track {
     for (let i = Math.round(180 / this.spacing); i < this.N - Math.round(120 / this.spacing); i += step) {
       // 점프대 앞뒤 45m 는 피해서 뒤로 밀기
       let j = i;
-      while (this.ramps.some((r) => j > r.i0 - clear && j < r.i1 + clear)) j += clear;
+      while (this.ramps.some((r) => j > r.i0 - clear && j < r.i1 + clear) || this.stunts.some((st) => j > st.a && j < st.b)) j += clear;
       const p = this.points[j], s = this.sides[j];
       for (const lat of [-8.3, -5, -1.7, 1.7, 5, 8.3]) out.push({ x: p.x + s.x * lat, z: p.z + s.z * lat, y: this.height[j] + this.bank[j] * lat, index: j });
     }
@@ -539,6 +589,11 @@ export class Track {
 
     // 출발선 + 구역 경계 게이트
     this.buildGate(0, 'START · FINISH', '#e63946', 0x2b2d42, renderer, true);
+    for (const st of this.stunts) {
+      const at = Math.round(st.i - (st.kind === 'jump' ? 95 : 70) / this.spacing);
+      if (st.kind === 'jump') this.buildGate(at, '대점프  BIG JUMP ▲', '#ff7b00', 0x3a2a10, renderer, false);
+      else this.buildGate(at, '⚠ 낭떠러지  CLIFF', '#d62828', 0x2b2d42, renderer, false);
+    }
     for (let i = 1; i < this.N; i++) {
       if (this.zone[i] !== this.zone[i - 1]) {
         const zn = ZONES[this.zone[i]];
@@ -737,6 +792,51 @@ export class Track {
       gSide.computeVertexNormals();
       this.group.add(new THREE.Mesh(gSide, sideMat));
     }
+    this.buildBoostPads(renderer);
+  }
+
+  /** 부스터 발판: 도로 위에 빛나는 화살표 띠 */
+  buildBoostPads(renderer) {
+    const tex = canvasTexture(128, 128, (ctx, w, h) => {
+      ctx.fillStyle = '#0b3d91'; ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#5ff2ff';
+      for (let k = 0; k < 2; k++) {
+        const y = k * 64 + 52;
+        ctx.beginPath();
+        ctx.moveTo(10, y); ctx.lineTo(w / 2, y - 40); ctx.lineTo(w - 10, y);
+        ctx.lineTo(w - 10, y + 12); ctx.lineTo(w / 2, y - 26); ctx.lineTo(10, y + 12);
+        ctx.fill();
+      }
+    }, renderer);
+    tex.wrapT = THREE.RepeatWrapping;
+    const mat = new THREE.MeshStandardMaterial({ map: tex, emissive: 0x2aa8ff, emissiveIntensity: 0.6, emissiveMap: tex, roughness: 0.4, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+    for (const r of this.ramps) if (r.mega) this.group.add(this.roadDecal(r.i0 - r.pad, r.i0, ROAD_HALF - 2, 6, mat));
+    // 낭떠러지 가장자리: 빨강·흰색 경고 줄무늬
+    const lip = canvasTexture(128, 32, (ctx, w, h) => {
+      for (let k = 0; k < 8; k++) { ctx.fillStyle = k % 2 ? '#ffffff' : '#e63946'; ctx.fillRect((k * w) / 8, 0, w / 8 + 1, h); }
+    }, renderer);
+    const lipMat = new THREE.MeshStandardMaterial({ map: lip, roughness: 0.6, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+    for (const st of this.stunts) if (st.kind === 'cliff') this.group.add(this.roadDecal(st.i - Math.round(3 / this.spacing), st.i, ROAD_HALF, 1000, lipMat));
+  }
+
+  /** 도로 위에 얇게 붙는 띠 (i0~i1 구간, 폭 ±half, vTile m 마다 텍스처 반복) */
+  roadDecal(i0, i1, half, vTile, mat) {
+    const pos = [], uv = [], idx = [];
+    for (let i = i0, k = 0; i <= i1; i++, k++) {
+      const p = this.points[i], s = this.sides[i], h = this.height[i], bk = this.bank[i];
+      const v = ((i - i0) * this.spacing) / vTile;
+      pos.push(p.x - s.x * half, h - bk * half + 0.05, p.z - s.z * half, p.x + s.x * half, h + bk * half + 0.05, p.z + s.z * half);
+      uv.push(0, v, 1, v);
+      if (k > 0) { const a = (k - 1) * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const mesh = new THREE.Mesh(g, mat);
+    mesh.receiveShadow = true;
+    return mesh;
   }
 
   buildGate(index, text, color, postColor, renderer, checker) {

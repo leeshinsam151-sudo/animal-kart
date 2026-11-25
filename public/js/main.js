@@ -501,7 +501,9 @@ function updateRemotes(now, dt) {
       // 높이: 땅에 붙어 있던 카트는 예측한 위치의 지면 높이로
       const sl = track.locate(st.x, st.z, r.hint);
       const grounded = st.y == null || st.y < track.groundAt(sl.f, sl.lateral) + 0.4;
-      Object.assign(r, { x: pos.x, z: pos.z, ny: grounded ? null : st.y, ry: pr.ry, st: st.st, fl: st.fl });
+      // 높이도 같은 시간만큼 포물선으로 앞당김 (긴 점프·낭떠러지에서 위치는 앞인데 높이만 늦게 따라오는 것 방지)
+      const yb = st.y != null && lead > 0 && !stunned ? st.y + st.vy * lead - 16 * lead * lead : null;
+      Object.assign(r, { x: pos.x, z: pos.z, ny: grounded ? null : yb ?? st.y, yb, ry: pr.ry, st: st.st, fl: st.fl });
       sp = st.sp;
       r.vx = Math.sin(pr.ry) * sp;  // 충돌 계산용 속도
       r.vz = Math.cos(pr.ry) * sp;
@@ -512,7 +514,9 @@ function updateRemotes(now, dt) {
     const rl = track.locate(r.x, r.z, r.hint);
     r.hint = rl.index; // 미사일 추적용 트랙 위치
     const rGround = track.groundAt(rl.f, rl.lateral);
-    r.y = r.ny ?? rGround; // 서버가 높이를 안 주면 트랙 높이로
+    // 지난 상태는 땅 위였어도, 앞당긴 위치의 지면이 포물선보다 훨씬 낮으면(점프대 끝·낭떠러지) 이미 날아오른 것
+    const launched = r.ny == null && r.yb != null && r.yb > rGround + 0.8;
+    r.y = Math.max(launched ? r.yb : r.ny ?? rGround, rGround); // 서버가 높이를 안 주면 트랙 높이로 (땅 밑으로는 안 들어감)
     const rAir = r.y > rGround + 0.4;
     const rDir = Math.sin(r.ry) * track.tangents[rl.index].x + Math.cos(r.ry) * track.tangents[rl.index].z;
     r.pitch = (r.pitch || 0) + ((rAir ? 0 : -Math.atan(track.slopeAt(rl.f) * rDir)) - (r.pitch || 0)) * Math.min(1, dt * 8);
@@ -694,6 +698,12 @@ function frame(now) {
     if (c.boosting && !game.wasBoosting) sound.boost();
     game.wasBoosting = c.boosting;
     if (c.air && !game.wasAir && c.vy > 4) sound.jump();
+    // 대점프대 / 낭떠러지에서 날아오르면 한마디
+    if (c.air && !game.wasAir && !game.finished) {
+      const st = track.stuntNear(c.hint, 30 / track.spacing);
+      if (st?.kind === 'jump' && c.vy > 8) ui.toast('🚀 대점프!', 1200);
+      else if (st?.kind === 'cliff') { ui.toast('😱 낭떠러지!', 1200); sound.jump(); }
+    }
     game.wasAir = c.air;
 
     const list = standings();

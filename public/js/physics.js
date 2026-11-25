@@ -293,6 +293,9 @@ export class CarController {
     this.wrongWay = fwdDot < -0.3 && this.vF > 3;
 
     this.groundY = track_groundAt(track, loc);
+    this.launchCap = track.launchCapAt?.(loc.f, loc.lateral) ?? MAX_LAUNCH_VY;
+    // 대점프대 앞 부스터 발판: 밟고 있는 동안 + 0.5초 부스트 (점프대에서 최고 속도로 날아오름)
+    if (!this.air && track.boostPadAt?.(loc.f, loc.lateral)) this.boostTime = Math.max(this.boostTime, 0.5);
     this.slope = track.slopeAt(loc.f) * fwdDot;
     this.roll = -track.bankAt(loc.f) * Math.sign(fwdDot || 1); // 기울어진 커브에서 카트도 옆으로 기울어짐
     // 지면을 따라 달릴 때의 수직 속도 = 경사 × 트랙 방향 속도 (위치 차이로 구하면 잡음이 생김)
@@ -308,14 +311,19 @@ export class CarController {
     if (!this.air) {
       // 지면이 포물선보다 빨리 꺼지면(점프대 끝, 급한 언덕 꼭대기) 공중으로.
       // 단, 착지 직후 0.3초는 언덕 때문에 다시 뜨지 않음 (뜨고-착지-뜨고 반복으로 화면이 떨리는 것 방지)
-      const crest = this.landCooldown <= 0 && this.groundVy < this.vy - GRAVITY * dt * 1.3;
+      // 낭떠러지처럼 지면이 확 꺼지면(한 프레임에 중력의 5배 이상) 착지 직후라도 바로 공중으로
+      const drop = this.vy - this.groundVy;
+      const crest = (this.landCooldown <= 0 && drop > GRAVITY * dt * 1.3) || drop > GRAVITY * dt * 5;
       // 갑자기 꺼짐(점프대 끝): 경사를 따라 내려갈 때 예상되는 높이보다 0.15m 이상 낮으면
       const falling = crest || ground < this.y + this.vy * dt - 0.15;
       if (falling && this.vF > 12) {
         this.air = true;
         this.airTime = 0;
-        this.vy = Math.min(this.vy, MAX_LAUNCH_VY);
+        // 경사 계산은 몇 m 앞을 내다봐서 낭떠러지 끝에선 미리 가파라짐 → 직전 프레임까지 실제로 움직인 높이 속도와 비교해 큰 쪽으로
+        // (평평한 고원 끝에서 수평으로 튀어나가 떨어짐). 대점프대는 상한이 더 높음
+        this.vy = Math.min(Math.max(this.vy, Math.min(this.realVy ?? this.vy, 0)), this.launchCap ?? MAX_LAUNCH_VY);
       } else {
+        this.realVy = (ground - this.y) / Math.max(dt, 1e-3);
         this.vy = this.groundVy;
         this.y = ground;
         return;
@@ -329,6 +337,7 @@ export class CarController {
       this.landing = Math.min(1, Math.max(0, -this.vy - 4) / 14);
       this.impact = Math.min(1, this.impact + this.landing * 0.5);
       this.y = ground;
+      this.realVy = this.vy;   // 착지 직전 실제 낙하 속도
       this.vy = this.groundVy; // 경사면에 착지하면 경사를 따라가는 속도로 (연속 튀어오름 방지)
       this.air = false;
       this.landCooldown = 0.3;

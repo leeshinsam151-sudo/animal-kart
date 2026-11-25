@@ -51,10 +51,12 @@ export function sampleAt(buf, rt, extrapolate = true) {
   const a = buf[0], c = buf[1];
   // 두 스냅샷 사이 방향 변화로 회전 속도(rad/s) 추정 → 곡선 예측에 사용
   const w = c ? (lerpAngle(a.ry, c.ry, 1) - a.ry) / Math.max(0.001, (c.t - a.t) / 1000) : 0;
+  // 높이 변화 속도 (점프 중 높이를 앞당겨 그릴 때 사용)
+  const vy = c && a.y != null && c.y != null ? (c.y - a.y) / Math.max(0.001, (c.t - a.t) / 1000) : 0;
   if (c && rt >= a.t && rt <= c.t) {
     const k = (rt - a.t) / (c.t - a.t || 1);
     return {
-      w,
+      w, vy,
       x: a.x + (c.x - a.x) * k,
       z: a.z + (c.z - a.z) * k,
       y: a.y != null && c.y != null ? a.y + (c.y - a.y) * k : null,
@@ -68,7 +70,7 @@ export function sampleAt(buf, rt, extrapolate = true) {
   const last = rt < a.t ? a : c || a;
   const ahead = extrapolate ? Math.max(0, Math.min(rt - last.t, EXTRAP_MAX)) / 1000 : 0;
   return {
-    w,
+    w, vy: 0,
     x: last.x + Math.sin(last.ry) * last.sp * ahead,
     z: last.z + Math.cos(last.ry) * last.sp * ahead,
     y: last.y, ry: last.ry, sp: last.sp, st: last.st, fl: last.fl,
