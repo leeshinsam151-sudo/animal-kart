@@ -5,6 +5,7 @@ import { CHARACTER_IDS, CHARACTERS } from './kart.js';
 import { COLORS } from './ui.js';
 import { BOMB_RANGE, BOMB_FLIGHT, MISSILE_LOCK_RANGE, MISSILE_HIT_HEIGHT, BLOCK_RADIUS, CLOUD_MS } from './items.js';
 import { DEFAULT_TRACK, trackById } from './tracks.js';
+import { applyHazards, safeLane } from './hazards.js';
 
 const COUNTDOWN_MS = 3000;
 const RESULTS_MS = 8000;
@@ -293,15 +294,19 @@ export class LocalServer {
     bot.laneTimer -= dt;
     if (bot.laneTimer <= 0) { bot.laneTarget = (Math.random() - 0.5) * 12; bot.laneTimer = 2 + Math.random() * 4; }
     bot.lane += (bot.laneTarget - bot.lane) * Math.min(1, dt * 0.8);
+    // 앞에 나무통·모래 늪·크레바스가 있으면 그 줄의 빈틈을 직접 노림 (조금 천천히)
+    const aim = safeLane(t, c.hint, bot.lane);
+    if (aim) { bot.lane = aim.lane; bot.laneTarget = aim.lane; }
+    const careful = aim ? 40 : Infinity;
     const look = 22 + Math.round(Math.min(20, c.vF * 0.4));
-    const i = (c.hint + look) % N;
+    const i = aim && aim.k - c.hint > 5 ? aim.k % N : (c.hint + look) % N;
     const p = t.points[i], s = t.sides[i];
     const tx = p.x + s.x * bot.lane, tz = p.z + s.z * bot.lane;
     const d = wrapAngle(Math.atan2(tx - c.x, tz - c.z) - c.heading);
     const sharp = Math.abs(d) > 0.22;
     // 드리프트는 속도를 유지하므로 급커브에서만 감속
     return {
-      throttle: c.vF < bot.cap && !(Math.abs(d) > 0.45 && c.vF > 36),
+      throttle: c.vF < Math.min(bot.cap, careful) && !(Math.abs(d) > 0.45 && c.vF > 36),
       brake: Math.abs(d) > 0.5 && c.vF > 42,
       left: d > 0.03,
       right: d < -0.03,
@@ -324,7 +329,10 @@ export class LocalServer {
         if (!bot.racing) continue;
         const mt = bot.ctrl.magnetTime > 0 && bot.magnetTarget != null ? this.players.get(bot.magnetTarget) : null;
         bot.ctrl.magnetTarget = mt ? (mt.bot ? { x: mt.ctrl.x, z: mt.ctrl.z } : { x: mt.x, z: mt.z }) : null;
-        for (let k = 0; k < steps; k++) bot.ctrl.update(dt / steps, this.drive(bot, dt / steps));
+        for (let k = 0; k < steps; k++) {
+          bot.ctrl.update(dt / steps, this.drive(bot, dt / steps));
+          if (!bot.finished) applyHazards(bot.ctrl, this.track, dt / steps); // 트랙 함정 (화면과 같은 장애물 위치)
+        }
         const c = bot.ctrl;
         bot.progress = bot.finished ? bot.progress : c.progress;
 

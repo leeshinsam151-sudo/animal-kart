@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { TRACKS, DEFAULT_TRACK, trackById } from './tracks.js';
+import { planHazards, buildHazardMeshes } from './hazards.js';
 export { TRACKS, DEFAULT_TRACK, trackById };
 
 export const ROAD_HALF = 10;   // 도로 반폭 (m) - 6명이 3대씩 나란히 달릴 수 있는 폭
@@ -399,8 +400,10 @@ export class Track {
       const t = this.def.theme, lo = m(150), hi = N - m(150);
       if (t === 'forest') { addZone(t, lo, N / 2, 'A'); addZone(t, N / 2, hi, 'B'); }
       else addZone(t, lo, hi, 'S');
+      this.zoneRuns = [{ zone: t, a: lo, b: hi }];
     } else {
       for (const r of runs) addZone(r.zone, r.a, r.b, r.a === 0 ? 'A' : 'B');
+      this.zoneRuns = runs;
     }
     for (const c of crests) quiet.push([c - m(90), c + m(90)]);
     quiet.push([N - m(140), N + m(170)], [-m(140), m(170)]); // 출발선 앞뒤는 평평하게
@@ -435,6 +438,8 @@ export class Track {
     const K2 = Math.round(12 / sp);
     // 점프대 바로 앞 50m 는 부스터 발판 → 오르막에서 느려져도 최고 속도로 날아감
     for (const c of megaCrests) this.ramps.push({ i0: c - K2, i1: c, h: 3.2, cap: 16, mega: true, pad: Math.round(50 / sp) });
+    // 테마별 함정 (점프대·스턴트를 피해서 곧은 곳에)
+    planHazards(this);
   }
 
   /** 소수 인덱스 f 에서의 커브 기울기 (lateral 1m 당 높이 변화) */
@@ -536,7 +541,8 @@ export class Track {
     for (let i = Math.round(180 / this.spacing); i < this.N - Math.round(120 / this.spacing); i += step) {
       // 점프대 앞뒤 45m 는 피해서 뒤로 밀기
       let j = i;
-      while (this.ramps.some((r) => j > r.i0 - clear && j < r.i1 + clear) || this.stunts.some((st) => j > st.a && j < st.b)) j += clear;
+      while (this.ramps.some((r) => j > r.i0 - clear && j < r.i1 + clear) || this.stunts.some((st) => j > st.a && j < st.b)
+        || this.hazardSpans.some(([a, b]) => j > a - clear && j < b + clear)) j += clear;
       const p = this.points[j], s = this.sides[j];
       for (const lat of [-8.3, -5, -1.7, 1.7, 5, 8.3]) out.push({ x: p.x + s.x * lat, z: p.z + s.z * lat, y: this.height[j] + this.bank[j] * lat, index: j });
     }
@@ -637,6 +643,18 @@ export class Track {
     this.buildViaduct();
     this.buildTunnel();
     this.buildRamps(renderer);
+    buildHazardMeshes(this, this.group);
+    // 위험한 함정 앞 경고 아치
+    const warned = new Set();
+    for (const h of this.hazards) {
+      const at = h.kind === 'crevasse' ? h.i0 : h.kind === 'sand' ? h.i : null;
+      if (at == null) continue;
+      const gi = at - Math.round(45 / this.spacing);
+      if ([...warned].some((w) => Math.abs(w - gi) < 80 / this.spacing)) continue; // 같은 구역 함정끼리는 한 번만
+      warned.add(gi);
+      if (h.kind === 'crevasse') this.buildGate(gi, '⚠ 크레바스  CREVASSE', '#3a86c8', 0x1d3557, renderer, false);
+      else this.buildGate(gi, '⚠ 모래 늪  QUICKSAND', '#c8553d', 0x5c3b1e, renderer, false);
+    }
     this.buildScenery();
   }
 

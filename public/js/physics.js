@@ -32,6 +32,7 @@ export const SPIN_TIME = 1.2;   // 바나나 스핀 시간
 export const TRAP_TIME = 1.8;   // 물폭탄 갇힘 시간
 export const BLAST_TIME = 1.5;  // 미사일 피격 (공중 회전) 시간
 export const SHIELD_TIME = 5;   // 방어막 유지 시간
+export const FALL_TIME = 1.3;   // 크레바스에 빠졌을 때 떨어지는 시간 → 구간 앞에서 다시 시작
 export const MAGNET_TIME = 3;   // 자석 유지 시간
 const MAGNET_MAX = 68;          // 자석으로 끌려갈 때 최고속도 (보통 56, 부스터 74)
 const MAGNET_ACCEL = 30;
@@ -73,6 +74,10 @@ export class CarController {
     this.magnetTime = 0;   // 자석 (앞 카트에게 끌려감)
     this.magnetTarget = null; // { x, z } - main 이 매 프레임 지정 (없으면 가속만)
     this.onShieldBreak = null;
+    this.fallTime = 0;     // 크레바스 추락 중
+    this.fallIdx = 0;      // 추락 후 다시 시작할 트랙 위치
+    this.sink = 0;         // 모래 늪에 가라앉은 깊이 (연출용)
+    this.inSand = false;
     this.yawRate = 0;      // 현재 회전 속도 (부드럽게 변함)
     this.steerScale = 1;   // 조향 감도 (설정에서 0.6~1.4)
     // 높이 / 점프
@@ -88,7 +93,7 @@ export class CarController {
   }
 
   reset(x, z, heading) {
-    Object.assign(this, { x, z, heading, vx: 0, vz: 0, vF: 0, steer: 0, impact: 0, gauge: 0, items: 0, boostTime: 0, drifting: false, spinTime: 0, trapTime: 0, blastTime: 0, yawRate: 0, shieldTime: 0, magnetTime: 0, magnetTarget: null });
+    Object.assign(this, { x, z, heading, vx: 0, vz: 0, vF: 0, steer: 0, impact: 0, gauge: 0, items: 0, boostTime: 0, drifting: false, spinTime: 0, trapTime: 0, blastTime: 0, yawRate: 0, shieldTime: 0, magnetTime: 0, magnetTarget: null, fallTime: 0, sink: 0, inSand: false });
     const loc = this.track.locate(x, z);
     this.hint = loc.index;
     this.lastF = loc.f;
@@ -119,7 +124,18 @@ export class CarController {
   /** 완주 랩 수 기준 진행도 (1.0 = 1랩) */
   get progress() { return this.progressRaw / this.track.N; }
   get boosting() { return this.boostTime > 0; }
-  get stunned() { return this.spinTime > 0 || this.trapTime > 0 || this.blastTime > 0; }
+  get stunned() { return this.spinTime > 0 || this.trapTime > 0 || this.blastTime > 0 || this.fallTime > 0; }
+
+  /** 크레바스에 빠짐 → FALL_TIME 동안 아래로 떨어진 뒤 idx 위치에서 다시 시작 */
+  fall(idx, lat = 0) {
+    if (this.fallTime > 0) return false;
+    this.fallTime = FALL_TIME;
+    this.fallIdx = ((idx % this.track.N) + this.track.N) % this.track.N;
+    this.fallLat = lat;
+    this.vy = Math.min(this.vy, 0);
+    Object.assign(this, { boostTime: 0, magnetTime: 0, drifting: false, spinTime: 0, trapTime: 0, blastTime: 0, air: true });
+    return true;
+  }
 
   /** 방어막이 있으면 공격 1번을 막고 사라짐 → true */
   absorb() {
@@ -167,6 +183,20 @@ export class CarController {
   }
 
   update(dt, inp) {
+    // 크레바스 추락: 앞으로 조금 미끄러지며 떨어지다가 구간 앞에서 다시 시작
+    if (this.fallTime > 0) {
+      this.fallTime -= dt;
+      this.vy -= GRAVITY * dt;
+      this.y += this.vy * dt;
+      this.vx *= Math.exp(-1.5 * dt); this.vz *= Math.exp(-1.5 * dt);
+      this.x += this.vx * dt; this.z += this.vz * dt;
+      if (this.fallTime <= 0) {
+        this.fallTime = 0; this.hint = this.fallIdx; this.respawn();
+        const s = this.track.sides[this.fallIdx]; // 다리와 줄 맞춰서
+        this.x += s.x * this.fallLat; this.z += s.z * this.fallLat;
+      }
+      return;
+    }
     // 피격 중엔 조작 불가 + 감속
     if (this.stunned) {
       const damp = Math.exp(-(this.trapTime > 0 ? 7 : this.blastTime > 0 ? 3.5 : 2.2) * dt);

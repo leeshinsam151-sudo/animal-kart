@@ -10,12 +10,19 @@ import { Net } from './net.js';
 import { AudioSys } from './audio.js';
 import { UI, COLORS } from './ui.js';
 import { NetClock, sampleAt, smoothPosition, lerpAngle, predict, leadTime } from './interp.js';
+import { updateHazards, applyHazards } from './hazards.js';
 
 const SEND_INTERVAL = 50;   // 내 상태 전송 주기 (ms)
 // 원격 카트 보간: 서버 시각 기준 정렬 + 흔들림에 맞춘 지연 자동 조절 + 짧은 예측 (interp.js)
 const netClock = new NetClock();
 const SHOW_INDEX = 30;      // 차고(로비) 화면에서 카트를 세워둘 트랙 위치
-const FLAG_DRIFT = 1, FLAG_BOOST = 2, FLAG_SPIN = 4, FLAG_TRAP = 8, FLAG_BLAST = 16, FLAG_SHIELD = 32, FLAG_MAGNET = 64;
+const FLAG_DRIFT = 1, FLAG_BOOST = 2, FLAG_SPIN = 4, FLAG_TRAP = 8, FLAG_BLAST = 16, FLAG_SHIELD = 32, FLAG_MAGNET = 64, FLAG_FALL = 128;
+
+/** 움직이는 함정용 공유 시계(초): 멀티는 서버 시각 추정, 연습 모드는 같은 페이지 안이라 내 시계 */
+function hazardClock() {
+  if (net.offline || netClock.offset == null) return Date.now() / 1000;
+  return (performance.now() - netClock.offset + (net.rtt || 0) / 2) / 1000;
+}
 const MAGNET_RANGE = 200; // m - 자석은 이 거리 안의 바로 앞 카트에게 끌려감
 const ITEM_ROLL_TIME = 0.8; // 아이템 룰렛 시간 (s)
 const MAX_HELD_ITEMS = 2;   // 아이템 최대 보관 개수
@@ -550,7 +557,7 @@ function updateRemotes(now, dt) {
       const pos = netClock.useServerTime ? smoothPosition(r, pr, dt) : pr; // 튐을 짧게 나눠서 보정
       // 높이: 땅에 붙어 있던 카트는 예측한 위치의 지면 높이로
       const sl = track.locate(st.x, st.z, r.hint);
-      const grounded = st.y == null || st.y < track.groundAt(sl.f, sl.lateral) + 0.4;
+      const grounded = !(st.fl & FLAG_FALL) && (st.y == null || st.y < track.groundAt(sl.f, sl.lateral) + 0.4);
       // 높이도 같은 시간만큼 포물선으로 앞당김 (긴 점프·낭떠러지에서 위치는 앞인데 높이만 늦게 따라오는 것 방지)
       const yb = st.y != null && lead > 0 && !stunned ? st.y + st.vy * lead - 16 * lead * lead : null;
       Object.assign(r, { x: pos.x, z: pos.z, ny: grounded ? null : yb ?? st.y, yb, ry: pr.ry, st: st.st, fl: st.fl });
@@ -566,7 +573,8 @@ function updateRemotes(now, dt) {
     const rGround = track.groundAt(rl.f, rl.lateral);
     // 지난 상태는 땅 위였어도, 앞당긴 위치의 지면이 포물선보다 훨씬 낮으면(점프대 끝·낭떠러지) 이미 날아오른 것
     const launched = r.ny == null && r.yb != null && r.yb > rGround + 0.8;
-    r.y = Math.max(launched ? r.yb : r.ny ?? rGround, rGround); // 서버가 높이를 안 주면 트랙 높이로 (땅 밑으로는 안 들어감)
+    r.y = r.fl & FLAG_FALL ? r.ny ?? rGround // 크레바스로 떨어지는 중엔 땅 밑으로
+      : Math.max(launched ? r.yb : r.ny ?? rGround, rGround); // 서버가 높이를 안 주면 트랙 높이로 (땅 밑으로는 안 들어감)
     const rAir = r.y > rGround + 0.4;
     const rDir = Math.sin(r.ry) * track.tangents[rl.index].x + Math.cos(r.ry) * track.tangents[rl.index].z;
     r.pitch = (r.pitch || 0) + ((rAir ? 0 : -Math.atan(track.slopeAt(rl.f) * rDir)) - (r.pitch || 0)) * Math.min(1, dt * 8);
@@ -692,6 +700,13 @@ function frame(now) {
     c.update(dt, inp);
     if (c.impact - impactBefore > 0.15) sound.thud(Math.min(1, (c.impact - impactBefore) * 1.5)); // 벽 충돌·착지 소리
     collideKarts(c, now);
+    // 트랙 함정 (나무통·모래 늪·크레바스·버스·블록 벽)
+    if (game.inputEnabled || game.finished) {
+      const ev = applyHazards(c, track, dt);
+      if (ev === 'hit') { sound.thud(0.8); crashFx(c.x, c.y, c.z, 12); }
+      else if (ev === 'sand') { ui.toast('🏜️ 모래 늪! 부스터로 빠져나오세요', 1300); sound.splash(0.5); }
+      else if (ev === 'fall') { ui.toast('🧊 크레바스에 빠졌다!', 1500); sound.slip(); }
+    }
 
     // 카트 메시 반영 (가감속/코너링에 따라 차체 기울기)
     const k = L.kart;
@@ -699,7 +714,7 @@ function frame(now) {
     const targetPitch = c.air ? -Math.atan2(c.vy, Math.max(Math.abs(c.vF), 8)) * 0.6 : -Math.atan(c.slope);
     k.pitch = (k.pitch || 0) + (targetPitch - (k.pitch || 0)) * Math.min(1, dt * (c.air ? 4 : 10));
     k.bankRoll = (k.bankRoll || 0) + ((c.air ? 0 : c.roll) - (k.bankRoll || 0)) * Math.min(1, dt * 8);
-    k.root.position.set(c.x, c.y, c.z);
+    k.root.position.set(c.x, c.y - c.sink, c.z); // 모래 늪에선 가라앉음
     k.root.rotation.set(k.pitch, c.heading, k.bankRoll);
     const roll = THREE.MathUtils.clamp(-c.steer * c.vF * 0.005 + c.slip * 0.008, -0.09, 0.09);
     const pitch = THREE.MathUtils.clamp(-c.accel * 0.0012, -0.05, 0.05);
@@ -790,6 +805,7 @@ function frame(now) {
     sound.update(0, 0, false);
   }
 
+  updateHazards(track, hazardClock());
   items.update(dt, now, game.time);
   updateCamera(dt);
   updateAtmosphere(dt);
@@ -1068,7 +1084,7 @@ function sendState(now) {
   const c = game.local.ctrl;
   game.lastSend = now;
   const fl = (c.drifting ? FLAG_DRIFT : 0) | (c.boosting ? FLAG_BOOST : 0) | (c.spinTime > 0 ? FLAG_SPIN : 0) | (c.trapTime > 0 ? FLAG_TRAP : 0) | (c.blastTime > 0 ? FLAG_BLAST : 0)
-    | (c.shieldTime > 0 ? FLAG_SHIELD : 0) | (c.magnetTime > 0 ? FLAG_MAGNET : 0);
+    | (c.shieldTime > 0 ? FLAG_SHIELD : 0) | (c.magnetTime > 0 ? FLAG_MAGNET : 0) | (c.fallTime > 0 ? FLAG_FALL : 0);
   net.send({ type: 'state', x: c.x, z: c.z, y: c.y, ry: c.heading, sp: c.vF, st: c.steer, p: c.progress, fl });
 }
 

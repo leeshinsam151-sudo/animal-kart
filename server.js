@@ -262,7 +262,7 @@ wss.on('connection', (ws) => {
       case 'state': {
         if (!player.racing) break;
         const n = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : 0);
-        player.s = [n(msg.x), n(msg.z), n(msg.ry), n(msg.sp), n(msg.st), (msg.fl | 0) & 127]; // fl: 1=드리프트, 2=부스터, 4=스핀, 8=물방울, 16=미사일 피격, 32=방어막, 64=자석
+        player.s = [n(msg.x), n(msg.z), n(msg.ry), n(msg.sp), n(msg.st), (msg.fl | 0) & 255]; // fl: 1=드리프트, 2=부스터, 4=스핀, 8=물방울, 16=미사일 피격, 32=방어막, 64=자석, 128=크레바스 추락
         player.y = n(msg.y);
         if (!player.finished) player.progress = Number.isFinite(msg.p) ? Math.round(msg.p * 10000) / 10000 : 0;
         break;
