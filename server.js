@@ -7,18 +7,18 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { randomBytes } from 'crypto';
+import { DEFAULT_TRACK, trackById, minLapMs } from './public/js/tracks.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 
-const LAPS = Number(process.env.LAPS) || 2; // 트랙이 약 4.9km 로 길어서 2랩 (테스트할 땐 LAPS=1)
+const LAPS_OVERRIDE = Number(process.env.LAPS) || 0; // 테스트용: 모든 트랙 바퀴 수 고정 (예: LAPS=1)
 const TICK_RATE = 20;            // 스냅샷 전송 빈도 (Hz)
 const MAX_PLAYERS = 6;               // 6명 기준으로 트랙 폭·출발 그리드·아이템 박스 배치
 const COUNTDOWN_MS = 3000;
 const RESULTS_MS = 8000;         // 결과 화면 유지 시간
 const AFTER_FIRST_FINISH_MS = 45000; // 1등 들어온 뒤 남은 사람 대기 시간
 const MAX_RACE_MS = 10 * 60 * 1000;
-const MIN_LAP_MS = 50000;        // 트랙 약 4.9km, 계속 부스터를 써도 한 바퀴 약 65초 → 여유 있게 50초
 const MAX_BANANAS = 30;
 const HEARTBEAT_MS = 5000;       // 연결 확인 주기 (응답 없으면 다음 주기에 끊음)
 const RESUME_MS = 20000;         // 레이스 중 끊긴 사람의 자리를 남겨두는 시간
@@ -39,11 +39,14 @@ let nextId = 1;
 function getRoom(code) {
   let room = rooms.get(code);
   if (!room) {
-    room = { code, players: new Map(), phase: 'lobby', hostId: null, raceStart: 0, finishOrder: [], timers: [], bananas: new Map(), missiles: new Map(), nextHazard: 1 };
+    room = { code, players: new Map(), phase: 'lobby', hostId: null, raceStart: 0, finishOrder: [], timers: [], bananas: new Map(), missiles: new Map(), nextHazard: 1, track: DEFAULT_TRACK, laps: 3 };
     rooms.set(code, room);
   }
   return room;
 }
+
+/** 이 방 트랙의 바퀴 수 (레이스 중엔 시작할 때 정한 값) */
+const lapsOf = (room) => (room.phase === 'lobby' ? LAPS_OVERRIDE || trackById(room.track).laps : room.laps);
 
 function send(ws, msg) {
   if (ws?.readyState === 1) ws.send(JSON.stringify(msg)); // 재접속 대기 중(ws 없음)이면 무시
@@ -88,6 +91,8 @@ function lobbyMsg(room) {
     type: 'lobby',
     hostId: room.hostId,
     phase: room.phase,
+    track: room.track,
+    laps: lapsOf(room),
     players: [...room.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color, char: p.char, racing: p.racing, away: !p.ws })),
   };
 }
@@ -103,6 +108,7 @@ function startRace(room) {
   room.finishOrder = [];
   room.bananas = new Map();
   room.missiles = new Map();
+  room.laps = LAPS_OVERRIDE || trackById(room.track).laps;
   const grid = [];
   let slot = 0;
   for (const p of room.players.values()) {
@@ -111,7 +117,7 @@ function startRace(room) {
     grid.push({ id: p.id, slot: slot++ });
   }
   broadcast(room, lobbyMsg(room));
-  broadcast(room, { type: 'countdown', ms: COUNTDOWN_MS, grid, laps: LAPS });
+  broadcast(room, { type: 'countdown', ms: COUNTDOWN_MS, grid, laps: room.laps, track: room.track });
   room.timers.push(setTimeout(() => {
     if (room.phase !== 'countdown') return;
     room.phase = 'racing';
@@ -175,7 +181,7 @@ wss.on('connection', (ws) => {
           old.ws = ws;
           player = old;
           room = r;
-          send(ws, { type: 'welcome', id: player.id, room: room.code, laps: LAPS, phase: room.phase, token: player.token, resume: true });
+          send(ws, { type: 'welcome', id: player.id, room: room.code, laps: lapsOf(room), track: room.track, phase: room.phase, token: player.token, resume: true });
           send(ws, syncMsg(room));
           broadcast(room, lobbyMsg(room));
           return;
@@ -200,7 +206,7 @@ wss.on('connection', (ws) => {
       };
       room.players.set(player.id, player);
       if (!room.hostId) room.hostId = player.id;
-      send(ws, { type: 'welcome', id: player.id, room: room.code, laps: LAPS, phase: room.phase, token: player.token });
+      send(ws, { type: 'welcome', id: player.id, room: room.code, laps: lapsOf(room), track: room.track, phase: room.phase, token: player.token });
       if (room.phase !== 'lobby') send(ws, syncMsg(room)); // 관전자: 이미 깔린 바나나 등
       broadcast(room, lobbyMsg(room));
       return;
@@ -221,6 +227,13 @@ wss.on('connection', (ws) => {
         if (player.id === room.hostId && room.phase === 'lobby') startRace(room);
         break;
 
+      case 'track': // 방장이 로비에서 트랙 선택
+        if (player.id !== room.hostId || room.phase !== 'lobby') break;
+        if (typeof msg.id !== 'string' || trackById(msg.id).id !== msg.id) break;
+        room.track = msg.id;
+        broadcast(room, lobbyMsg(room));
+        break;
+
       case 'state': {
         if (!player.racing) break;
         const n = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : 0);
@@ -233,11 +246,11 @@ wss.on('connection', (ws) => {
       case 'finish': {
         if (room.phase !== 'racing' || !player.racing || player.finished) break;
         // 아주 기초적인 검증: 서버가 마지막으로 받은 진행도가 완주 근처여야 함
-        if (player.progress < LAPS - 0.05) break;
-        if (Date.now() - room.raceStart < LAPS * MIN_LAP_MS) break;
+        if (player.progress < room.laps - 0.05) break;
+        if (Date.now() - room.raceStart < room.laps * minLapMs(trackById(room.track))) break;
         player.finished = true;
         player.finishTime = Date.now() - room.raceStart;
-        player.progress = LAPS + 1 - room.finishOrder.length * 0.001;
+        player.progress = room.laps + 1 - room.finishOrder.length * 0.001;
         room.finishOrder.push(player.id);
         broadcast(room, { type: 'finished', id: player.id, name: player.name, time: player.finishTime, place: room.finishOrder.length });
         if (room.finishOrder.length === 1) room.timers.push(setTimeout(() => endRace(room), AFTER_FIRST_FINISH_MS));

@@ -1,6 +1,6 @@
 // DOM 기반 UI: 메뉴, 차고(캐릭터 선택), 로비, HUD, 미니맵, 결과
 import { CHARACTERS, CHARACTER_IDS } from './kart.js';
-import { ZONES } from './track.js';
+import { ZONES, TRACKS } from './track.js';
 import { ITEM_INFO } from './items.js';
 
 const $ = (id) => document.getElementById(id);
@@ -29,6 +29,36 @@ export class UI {
     this.lastItems = 0;
   }
 
+  /** 트랙이 바뀌면 미니맵 다시 그리기 */
+  setTrack(track) {
+    this.track = track;
+    this.prepareMinimap();
+  }
+
+  /** 로비 트랙 카드 (모양 미리보기 + 길이·바퀴 수). 방장만 누를 수 있음 */
+  renderTrackPicker(selected, isHost, canPick) {
+    // 로비 메시지마다 다시 그리면 누르는 도중 버튼이 바뀌어 클릭이 사라짐 → 바뀐 게 있을 때만
+    const key = `${selected}|${isHost}|${canPick}`;
+    if (key === this.trackPickKey) return;
+    this.trackPickKey = key;
+    const shape = (pts) => {
+      const xs = pts.map((p) => p[0]), zs = pts.map((p) => p[1]);
+      const x0 = Math.min(...xs), z0 = Math.min(...zs), k = 28 / Math.max(Math.max(...xs) - x0, Math.max(...zs) - z0);
+      const ox = (34 - (Math.max(...xs) - x0) * k) / 2, oz = (34 - (Math.max(...zs) - z0) * k) / 2;
+      return pts.map((p) => `${(ox + (p[0] - x0) * k).toFixed(1)},${(oz + (p[1] - z0) * k).toFixed(1)}`).join(' ');
+    };
+    $('trackPick').innerHTML = TRACKS.map((t) => {
+      const color = t.theme ? ZONES.find((z) => z.id === t.theme).map : '#ffffff';
+      const sel = t.id === selected;
+      return `<button type="button" class="trk${sel ? ' sel' : ''}" data-track="${t.id}" style="--tc:${color}" title="${esc(t.desc)}" ${isHost && canPick ? '' : 'disabled'}>
+        <svg viewBox="0 0 34 34"><polygon points="${shape(t.points)}" fill="none" stroke="${color}" stroke-width="2.6" stroke-linejoin="round"/></svg>
+        <span>${t.emoji} ${esc(t.name)}</span><small>${(t.len / 1000).toFixed(1)}km · ${t.laps}바퀴</small>
+      </button>`;
+    }).join('');
+    const cur = TRACKS.find((t) => t.id === selected);
+    $('trackHint').textContent = cur ? `— ${cur.desc}${isHost ? '' : ' (방장이 선택)'}` : '';
+  }
+
   show(id, visible = true) {
     $(id).classList.toggle('hidden', !visible);
   }
@@ -48,8 +78,9 @@ export class UI {
     }).join('');
   }
 
-  updateLobby({ players, hostId, phase }, myId, room) {
+  updateLobby({ players, hostId, phase, track }, myId, room) {
     $('roomCode').textContent = room;
+    if (track) this.renderTrackPicker(track, myId === hostId, phase === 'lobby');
     $('playerList').innerHTML = players.map((p) => `
       <li>
         <span class="avatar" style="background:${p.color}">${charEmoji(p.char)}</span>

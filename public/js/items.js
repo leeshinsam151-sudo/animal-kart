@@ -106,16 +106,9 @@ export class Items {
     this.scene = scene;
     this.track = track;
     this.fx = fx;
-    this.boxes = track.itemBoxPositions().map((p) => ({ ...p, hiddenUntil: 0 }));
     const tex = boxTexture();
-    this.boxMesh = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(1.8, 1.8, 1.8),
-      new THREE.MeshStandardMaterial({ map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.35, roughness: 0.25, transparent: true, opacity: 0.92 }),
-      this.boxes.length,
-    );
-    this.boxMesh.castShadow = true;
-    this.boxMesh.frustumCulled = false;
-    scene.add(this.boxMesh);
+    this.boxGeo = new THREE.BoxGeometry(1.8, 1.8, 1.8);
+    this.boxMat = new THREE.MeshStandardMaterial({ map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.35, roughness: 0.25, transparent: true, opacity: 0.92 });
     this.dummy = new THREE.Object3D();
 
     this.bananas = new Map();   // id → { obj, x, z, owner, t }
@@ -124,6 +117,18 @@ export class Items {
     this.ringGeo = new THREE.RingGeometry(0.75, 1, 40).rotateX(-Math.PI / 2);
     this.missiles = [];
     this.getPos = () => null; // id → { x, z, hint } (main 에서 지정)
+    this.setTrack(track);
+  }
+
+  /** 트랙이 바뀌면 깔린 아이템을 치우고 아이템 박스를 새 트랙에 맞춰 다시 배치 */
+  setTrack(track) {
+    if (this.boxMesh) { this.clear(); this.boxMesh.removeFromParent(); this.boxMesh.dispose(); }
+    this.track = track;
+    this.boxes = track.itemBoxPositions().map((p) => ({ ...p, hiddenUntil: 0 }));
+    this.boxMesh = new THREE.InstancedMesh(this.boxGeo, this.boxMat, this.boxes.length);
+    this.boxMesh.castShadow = true;
+    this.boxMesh.frustumCulled = false;
+    this.scene.add(this.boxMesh);
   }
 
   clear() {

@@ -4,8 +4,8 @@ import { CarController } from './physics.js';
 import { CHARACTER_IDS, CHARACTERS } from './kart.js';
 import { COLORS } from './ui.js';
 import { BOMB_RANGE, BOMB_FLIGHT, MISSILE_LOCK_RANGE, MISSILE_HIT_HEIGHT, BLOCK_RADIUS } from './items.js';
+import { DEFAULT_TRACK, trackById } from './tracks.js';
 
-const LAPS = 2;
 const COUNTDOWN_MS = 3000;
 const RESULTS_MS = 8000;
 const AFTER_FIRST_FINISH_MS = 30000;
@@ -20,9 +20,9 @@ const FLAG = { drift: 1, boost: 2, spin: 4, trap: 8, blast: 16 };
 const wrapAngle = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
 
 export class LocalServer {
-  constructor({ track, items }, emit) {
-    this.track = track;
-    this.items = items;
+  constructor(ctx, emit) {
+    this.ctx = ctx;          // { track, items } - 트랙을 바꾸면 main 이 ctx.track 을 새 트랙으로 바꿈
+    this.trackId = DEFAULT_TRACK;
     this.emit = emit;
     this.phase = 'lobby';
     this.players = new Map();
@@ -37,12 +37,15 @@ export class LocalServer {
     setInterval(() => this.tick(), TICK);
   }
 
+  get track() { return this.ctx.track; }
+  get items() { return this.ctx.items; }
+  get laps() { return this.raceLaps ?? trackById(this.trackId).laps; }
   get bots() { return [...this.players.values()].filter((p) => p.bot); }
   get me() { return this.players.get(1); }
 
   lobbyMsg() {
     return {
-      type: 'lobby', hostId: 1, phase: this.phase,
+      type: 'lobby', hostId: 1, phase: this.phase, track: this.trackId, laps: this.laps,
       players: [...this.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color, char: p.char, racing: p.racing })),
     };
   }
@@ -61,7 +64,7 @@ export class LocalServer {
           const char = chars[i];
           this.players.set(i + 2, { id: i + 2, bot: true, name: `${CHARACTERS[char].name}봇`, char, color: colors[i * 2 % colors.length], racing: false });
         }
-        this.emit({ type: 'welcome', id: 1, room: 'offline', laps: LAPS, phase: 'lobby', offline: true });
+        this.emit({ type: 'welcome', id: 1, room: 'offline', laps: this.laps, track: this.trackId, phase: 'lobby', offline: true });
         this.emit(this.lobbyMsg());
         break;
       }
@@ -80,6 +83,11 @@ export class LocalServer {
       }
       case 'start':
         if (this.phase === 'lobby') this.startRace();
+        break;
+      case 'track':
+        if (this.phase !== 'lobby' || typeof msg.id !== 'string' || trackById(msg.id).id !== msg.id) break;
+        this.trackId = msg.id;
+        this.emit(this.lobbyMsg());
         break;
       case 'state': {
         const me = this.me;
@@ -108,6 +116,7 @@ export class LocalServer {
     this.bananas.clear();
     this.bombs = [];
     this.missiles.clear();
+    this.raceLaps = trackById(this.trackId).laps;
     // 내가 맨 뒤에서 출발 → 앞에 쫓아갈 상대가 있음
     const order = [...this.bots, this.me];
     const grid = order.map((p, slot) => ({ id: p.id, slot }));
@@ -125,7 +134,7 @@ export class LocalServer {
       }
     });
     this.emit(this.lobbyMsg());
-    this.emit({ type: 'countdown', ms: COUNTDOWN_MS, grid, laps: LAPS });
+    this.emit({ type: 'countdown', ms: COUNTDOWN_MS, grid, laps: this.laps, track: this.trackId });
     this.later(COUNTDOWN_MS, () => {
       this.phase = 'racing';
       this.raceStart = performance.now();
@@ -137,7 +146,7 @@ export class LocalServer {
     if (this.phase !== 'racing' || !p?.racing || p.finished) return;
     p.finished = true;
     p.finishTime = performance.now() - this.raceStart;
-    p.progress = LAPS + 1 - this.finishOrder.length * 0.001;
+    p.progress = this.laps + 1 - this.finishOrder.length * 0.001;
     this.finishOrder.push(p.id);
     this.emit({ type: 'finished', id: p.id, name: p.name, time: p.finishTime, place: this.finishOrder.length });
     if (this.finishOrder.length === 1) this.later(AFTER_FIRST_FINISH_MS, () => this.endRace());
@@ -161,6 +170,7 @@ export class LocalServer {
     });
     this.later(RESULTS_MS, () => {
       this.phase = 'lobby';
+      this.raceLaps = null;
       for (const p of this.players.values()) p.racing = false;
       this.emit(this.lobbyMsg());
     });
@@ -281,7 +291,7 @@ export class LocalServer {
         }
         if (bot.held && now > bot.useAt && !c.stunned && !bot.finished) this.botUseItem(bot, now);
 
-        if (!bot.finished && c.progress >= LAPS) this.finish(bot);
+        if (!bot.finished && c.progress >= this.laps) this.finish(bot);
       }
 
       // 카트끼리 충돌 (봇 ↔ 봇, 봇 ↔ 나)

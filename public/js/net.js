@@ -1,6 +1,6 @@
 // 네트워크 래퍼: WebSocket 서버에 접속. 서버가 없거나 연습 모드면 브라우저 안의 LocalServer(AI 봇)로 대체
 // - 연결이 끊기면 자동 재접속 (서버가 준 token 으로 레이스 중이던 자리에 복귀)
-// - 서버 응답이 6초 넘게 없으면 끊긴 것으로 보고 재접속 (와이파이 끊김은 close 이벤트가 안 올 때가 많음)
+// - 보낸 핑에 6초 넘게 아무 응답이 없으면 끊긴 것으로 보고 재접속 (와이파이 끊김은 close 이벤트가 안 올 때가 많음)
 import { LocalServer } from './localserver.js';
 
 const MAX_RETRIES = 5;
@@ -54,6 +54,7 @@ export class Net {
       this.everConnected = true;
       this.retries = 0;
       this.lastMsgAt = performance.now();
+      this.pingAt = 0;
       this.send({ type: 'join', ...this.join, token: this.token });
     };
     ws.onmessage = (e) => {
@@ -81,9 +82,14 @@ export class Net {
   }
 
   heartbeat() {
+    const now = performance.now();
+    // 이 타이머 자체가 늦게 불렸으면(탭이 백그라운드거나 화면이 잠깐 멈춤) 응답이 밀려 있을 수 있으니 이번엔 판정하지 않음
+    const stalled = now - (this.lastBeat || now) > PING_MS * 1.5;
+    this.lastBeat = now;
     const ws = this.ws;
     if (!ws || ws.readyState !== 1) return;
-    if (performance.now() - this.lastMsgAt > DEAD_MS) {
+    const waiting = this.pingAt && this.lastMsgAt < this.pingAt; // 보낸 핑 이후로 아무 메시지도 못 받음
+    if (waiting && !stalled && now - this.pingAt > DEAD_MS) {
       // 응답 없는 연결은 버리고 새로 접속
       this.ws = null;
       ws.onclose = null;
@@ -91,7 +97,7 @@ export class Net {
       this.retry();
       return;
     }
-    ws.send(JSON.stringify({ type: 'ping', t: performance.now() }));
+    if (!waiting) { ws.send(JSON.stringify({ type: 'ping', t: now })); this.pingAt = now; }
   }
 
   startOffline(join) {

@@ -1,23 +1,15 @@
-// 트랙: 숲 → 빙하 → 사막 → 도시 → 블록 세상을 지나는 약 5.6km 순환 코스
+// 트랙: tracks.js 의 트랙 정의(모양 + 테마)로 순환 코스를 만듦
 // - Catmull-Rom 스플라인을 따라 도로/연석/벽 리본 메시 생성
-// - 구역(zone)은 위치 기반 가중치로 부드럽게 섞임 (지면 색, 언덕 높이, 도로/벽 색, 하늘)
+// - 테마 단독 트랙은 전부 그 테마, '대륙 횡단'은 구역(zone)이 위치 기반 가중치로 부드럽게 섞임
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { TRACKS, DEFAULT_TRACK, trackById } from './tracks.js';
+export { TRACKS, DEFAULT_TRACK, trackById };
 
 export const ROAD_HALF = 10;   // 도로 반폭 (m) - 6명이 3대씩 나란히 달릴 수 있는 폭
 export const CURB_W = 1.4;     // 연석 폭
 export const WALL_DIST = 18;   // 중심선에서 벽까지 거리
 const SPACING = 1.4;           // 샘플 간격 (m)
-
-// 트랙 모양 (x, z, 단위 m). 첫 점이 출발선
-const CONTROL_POINTS = [
-  [-600, 400], [-600, 250], [-565, 150], [-622, 55], [-565, -45],                     // 숲 (S자 커브)
-  [-620, -200], [-700, -330], [-640, -470], [-500, -530], [-390, -480], [-290, -560], [-160, -570], // 빙하
-  [0, -480], [100, -570], [230, -510], [350, -560], [440, -560], [580, -500], [640, -360], [570, -250], [650, -140], // 사막 (S자 시케인)
-  [620, 20], [520, 90], [560, 220], [680, 300], [640, 440], [480, 480], [360, 410], [220, 460], // 도시
-  [150, 600], [200, 740], [120, 860], [30, 880], [-20, 960], [-110, 1000], [-220, 950], [-300, 840], // 블록 세상 (S자)
-  [-330, 710], [-420, 610], [-540, 630], [-640, 540],                                // 다시 숲
-];
 
 export const ZONES = [
   {
@@ -92,8 +84,12 @@ const smoothstep = (a, b, x) => {
   return t * t * (3 - 2 * t);
 };
 
-/** 위치별 구역 가중치 (합 = 1). 가장 가까운 구역 중심 기준으로 ~70m 폭에서 섞임 */
+// 지금 불러온 트랙의 테마 (단독 테마 트랙이면 그 구역 번호, 대륙 횡단이면 -1)
+let THEME = -1;
+
+/** 위치별 구역 가중치 (합 = 1). 가장 가까운 구역 중심 기준으로 ~70m 폭에서 섞임 (단독 테마 트랙은 항상 그 테마) */
 export function zoneWeights(x, z, out = ZONES.map(() => 0)) {
+  if (THEME >= 0) { for (let i = 0; i < ZONES.length; i++) out[i] = i === THEME ? 1 : 0; return out; }
   let dmin = Infinity;
   const d = ZONES.map((zn) => {
     const v = Math.hypot(x - zn.center[0], z - zn.center[1]);
@@ -185,8 +181,12 @@ function buildPrototypes() {
 }
 
 export class Track {
-  constructor(scene, renderer) {
-    const pts = CONTROL_POINTS.map(([x, z]) => new THREE.Vector3(x, 0, z));
+  constructor(scene, renderer, def = trackById(DEFAULT_TRACK)) {
+    this.def = def;
+    this.id = def.id;
+    this.laps = def.laps;
+    THEME = def.theme ? ZONES.findIndex((zn) => zn.id === def.theme) : -1;
+    const pts = def.points.map(([x, z]) => new THREE.Vector3(x, 0, z));
     this.curve = new THREE.CatmullRomCurve3(pts, true, 'centripetal');
     this.length = this.curve.getLength();
     this.N = Math.round(this.length / SPACING);
@@ -218,6 +218,20 @@ export class Track {
     scene.add(this.group);
     this.rand = mulberry32(1337);
     this.build(renderer);
+  }
+
+  /** 다른 트랙으로 바꿀 때: 장면에서 빼고 GPU 메모리(지오메트리·재질·텍스처) 해제 */
+  dispose() {
+    this.group.removeFromParent();
+    const seen = new Set();
+    const free = (o) => { if (o && !seen.has(o)) { seen.add(o); o.dispose(); } };
+    this.group.traverse((o) => {
+      free(o.geometry);
+      for (const mat of [].concat(o.material || [])) {
+        for (const v of Object.values(mat)) if (v && v.isTexture) free(v);
+        free(mat);
+      }
+    });
   }
 
   /** 가장 가까운 트랙 위치. hint(이전 인덱스)가 있으면 주변만 탐색 */
@@ -301,10 +315,11 @@ export class Track {
     const megaCrests = []; // 대점프대 (능선 꼭대기)
     this.stunts = [];      // { kind: 'jump' | 'cliff', i: 시작 인덱스, a, b: 아이템 박스를 피할 구간 }
     const quiet = []; // 굴곡/기울기를 넣지 않을 구간 [시작, 끝] (점프대·동굴·고가도로 주변)
-    for (const r of runs) {
-      const L = r.b - r.a, at = (t) => r.a + t * L;
-      if (r.zone === 'forest') {
-        if (r.a === 0) {
+    // 구역 하나의 지형 (a~b 구간). variant: 'A'/'B' = 같은 테마의 두 가지 모양, 'S' = 테마 단독 트랙용
+    const addZone = (zone, a, b, variant) => {
+      const L = b - a, at = (t) => a + t * L;
+      if (zone === 'forest') {
+        if (variant === 'A') {
           // 출발 후: 언덕 꼭대기 점프 → 계곡으로 내리막 → 다시 오르막
           const c = straightest(at(0.35), at(0.6));
           feats.push((i) => bump(i, c, m(110), 9));
@@ -318,20 +333,31 @@ export class Track {
           feats.push((i) => bump(i, c, m(110), 7));
           crests.push(c);
         }
-      } else if (r.zone === 'glacier') {
+      } else if (zone === 'glacier') {
         // 빙하 능선(+10m)을 올랐다가 얼음 동굴(-3m)로 크게 내리꽂힘
-        const t0 = at(0.32), t1 = at(0.62);
         // 능선 꼭대기 = 대점프대: 스키 점프처럼 아래로 길게 날아가 동굴 입구 앞에 착지
-        const rc = straightestW(t0 - m(175), t0 - m(135), 40, 130);
+        let t0, t1, rc;
+        if (variant === 'S') {
+          rc = straightestW(a + m(60), at(0.42), 40, 130);
+          t0 = rc + m(150); t1 = t0 + m(330);
+        } else {
+          t0 = at(0.32); t1 = at(0.62);
+          rc = straightestW(t0 - m(175), t0 - m(135), 40, 130);
+        }
         feats.push((i) => bump(i, rc, m(120), 11));
         megaCrests.push(rc);
         this.stunts.push({ kind: 'jump', i: rc, a: rc - m(120), b: rc + m(140) });
         quiet.push([rc - m(130), rc + m(90)]);
         feats.push((i) => plateau(i, t0 - m(70), t1 + m(70), m(70), -3));
-        feats.push((i) => bump(i, at(0.86), m(60), 5));
+        if (variant === 'S') {
+          // 단독 트랙: 동굴을 나온 뒤 얼음 언덕 점프
+          const c = straightest(t1 + m(170), b - m(120));
+          feats.push((i) => bump(i, c, m(100), 7));
+          crests.push(c);
+        } else feats.push((i) => bump(i, at(0.86), m(60), 5));
         for (let i = Math.floor(t0); i < t1; i++) this.tunnel[i] = 1;
         quiet.push([t0 - m(80), t1 + m(80)]);
-      } else if (r.zone === 'desert') {
+      } else if (zone === 'desert') {
         // 모래 언덕 3개 + 작은 물결이 이어지는 '리듬 구간'
         const c = straightest(at(0.35), at(0.65));
         feats.push((i) => bump(i, c - m(230), m(70), 7));
@@ -341,7 +367,7 @@ export class Track {
         feats.push((i) => (i > w0 && i < w1 ? 0.35 * (1 - Math.cos((2 * Math.PI * (i - w0)) / wl)) : 0));
         crests.push(c);
         quiet.push([w0 - m(10), w1 + m(10)]);
-      } else if (r.zone === 'block') {
+      } else if (zone === 'block') {
         // 블록 세상: 큰 언덕 사이로 굴곡이 많음
         const c = straightest(at(0.35), at(0.65));
         feats.push((i) => bump(i, c - m(260), m(75), 6));
@@ -357,7 +383,7 @@ export class Track {
         feats.push((i) => H * smoothstep(d - m(230), d - m(60), i) * edge(i));
         this.stunts.push({ kind: 'cliff', i: d, a: d - m(60), b: d + m(90) });
         quiet.push([d - m(240), d + m(150)]);
-      } else if (r.zone === 'city') {
+      } else if (zone === 'city') {
         // 지하로 살짝 내려갔다가 고가도로(15m)로 올라감
         const ramp = m(130);
         const s0 = at(0.14), s1 = straightest(at(0.68), at(0.86)) + ramp;
@@ -367,6 +393,14 @@ export class Track {
         for (let i = Math.floor(s0 + ramp * 0.45); i < s1 - ramp * 0.45; i++) this.bridge[i] = 1;
         quiet.push([s0, s1]);
       }
+    };
+    if (this.def.theme) {
+      // 테마 단독 트랙: 출발선 앞뒤를 빼고 트랙 전체에 그 테마 지형
+      const t = this.def.theme, lo = m(150), hi = N - m(150);
+      if (t === 'forest') { addZone(t, lo, N / 2, 'A'); addZone(t, N / 2, hi, 'B'); }
+      else addZone(t, lo, hi, 'S');
+    } else {
+      for (const r of runs) addZone(r.zone, r.a, r.b, r.a === 0 ? 'A' : 'B');
     }
     for (const c of crests) quiet.push([c - m(90), c + m(90)]);
     quiet.push([N - m(140), N + m(170)], [-m(140), m(170)]); // 출발선 앞뒤는 평평하게
@@ -897,7 +931,9 @@ export class Track {
     let snowmen = 0;
 
     // 트랙을 따라 양옆에 흩뿌리기 → 구역에 맞는 오브젝트 선택
-    for (let k = 0; k < 22000; k++) {
+    // 시도 횟수는 트랙 길이에 비례 (짧은 테마 트랙도 대륙 횡단과 같은 밀도 → 폰에서도 가볍게)
+    const tries = Math.round(22000 * Math.min(1, this.length / 5647));
+    for (let k = 0; k < tries; k++) {
       const i = Math.floor(rand() * this.N);
       const p = this.points[i], s = this.sides[i], t = this.tangents[i];
       const side = rand() < 0.5 ? -1 : 1;

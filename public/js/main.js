@@ -1,7 +1,7 @@
 // 게임 진입점: 렌더링, 입력, 네트워크 동기화, 게임 흐름
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { Track, ZONES, zoneWeights, blendColor } from './track.js';
+import { Track, ZONES, zoneWeights, blendColor, trackById, DEFAULT_TRACK } from './track.js';
 import { Items, SPLASH_RADIUS, MISSILE_HIT_RADIUS, MISSILE_HIT_HEIGHT, MISSILE_LOCK_RANGE } from './items.js';
 import { createKart, createNameTag, CHARACTER_IDS } from './kart.js';
 import { CarController, TOP_SPEED, SPIN_TIME, BLAST_TIME, BUMP_K } from './physics.js';
@@ -48,7 +48,7 @@ sun.shadow.bias = -0.0005;
 scene.add(sun, sun.target);
 const SUN_OFFSET = new THREE.Vector3(80, 150, 60);
 
-const track = new Track(scene, renderer);
+let track = new Track(scene, renderer, trackById(DEFAULT_TRACK)); // 로비에서 방장이 고른 트랙으로 바뀜 (loadTrack)
 const ui = new UI(track);
 const net = new Net();
 const sound = new AudioSys(); // 엔진음·효과음·배경음악
@@ -65,6 +65,21 @@ items.getPos = (id) => {
   return r && r.hint >= 0 ? { x: r.x, z: r.z, y: r.y, hint: r.hint } : null;
 };
 const snow = new Snow(scene);
+
+/** 다른 트랙으로 교체 (같은 트랙이면 아무것도 안 함). 바꿨으면 true */
+function loadTrack(id) {
+  if (!id || track.id === id) return false;
+  clearRace();
+  clearShowroom();
+  track.dispose();
+  track = new Track(scene, renderer, trackById(id));
+  ui.setTrack(track);
+  items.setTrack(track);
+  net.offlineContext.track = track; // 연습 모드 봇도 새 트랙에서 달림
+  if (window.__dbg) window.__dbg.track = track;
+  game.zoneIdx = -1;
+  return true;
+}
 
 // ---------------- 게임 상태 ----------------
 const game = {
@@ -329,6 +344,7 @@ net
       return;
     }
     if (game.local || game.remotes.size) clearRace(); // 자리 복귀 실패 → 새로 입장
+    loadTrack(m.track);
     Object.assign(game, { myId: m.id, room: m.room, laps: m.laps, phase: m.phase === 'lobby' ? 'lobby' : 'spectate' });
     if (!m.offline) history.replaceState(null, '', `?room=${encodeURIComponent(m.room)}` + (location.search.includes('debug') ? '&debug' : ''));
     document.body.classList.toggle('offline', !!m.offline);
@@ -350,6 +366,9 @@ net
       profile.char = me.char;
       profile.color = me.color;
     }
+    game.laps = m.laps ?? game.laps;
+    // 방장이 트랙을 바꿨으면 로비에서 바로 새 트랙으로 (레이스 중엔 바꾸지 않음)
+    if (m.phase === 'lobby') loadTrack(m.track);
     ui.updateLobby(m, game.myId, game.room);
     if (m.phase === 'lobby' && game.phase !== 'lobby') {
       game.phase = 'lobby';
@@ -361,7 +380,11 @@ net
   })
   .on('countdown', (m) => {
     game.laps = m.laps;
+    loadTrack(m.track);
     setupRace(m.grid);
+    // 트랙 이름 배너
+    const def = track.def, zn = ZONES[track.zone[0]];
+    ui.zoneBanner({ emoji: def.emoji, name: def.name, suffix: '', label: def.label, map: def.theme ? zn.map : '#ffffff' });
     game.phase = game.local ? 'countdown' : 'spectate';
     ui.show('garage', false);
     if (game.local) {
@@ -480,6 +503,10 @@ function join(offline) {
 document.getElementById('menu').addEventListener('submit', (e) => { e.preventDefault(); join(false); });
 document.getElementById('practiceBtn').addEventListener('click', () => join(true));
 document.getElementById('startBtn').addEventListener('click', () => net.send({ type: 'start' }));
+document.getElementById('trackPick').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-track]');
+  if (b && !b.disabled) net.send({ type: 'track', id: b.dataset.track }); // 클릭 소리는 공통 버튼 처리에서
+});
 document.getElementById('copyLink').addEventListener('click', async () => {
   const url = `${location.origin}/?room=${encodeURIComponent(game.room)}`;
   try { await navigator.clipboard.writeText(url); ui.toast('초대 링크를 복사했어요'); }
