@@ -1,5 +1,6 @@
 // 트랙별 함정/방해물
-// - 숲: 나무통 슬라럼 / 사막: 모래 늪 / 빙하: 크레바스(얼음 다리) / 도시: 교차로를 지나는 버스 / 블록: 블록 성문 + 움직이는 블록 벽
+// - 숲: 나무통 슬라럼 / 사막: 모래 늪 / 도시: 교차로를 지나는 버스 / 블록: 블록 성문 + 움직이는 블록 벽
+// - (빙하 크레바스는 빼고 대신 큰 높낮이로 — 판정·모양 코드는 남겨둠)
 // - 배치는 트랙 모양으로 정해짐(모든 화면에서 같음). 움직이는 것은 공유 시계(서버 시각)로 위치가 정해져서 통신 없이도 동기화
 // - 판정은 각자 자기 카트만 (원격 카트는 그 사람 화면이 판정한 결과가 위치/상태로 전달됨)
 import * as THREE from 'three';
@@ -51,15 +52,6 @@ export function planHazards(track) {
         if (c == null) continue;
         for (const [d, lat, r] of [[-24, -5.5, 4.6], [-8, 5, 4.2], [8, -4, 4.4], [24, 5.5, 4.6]]) list.push({ kind: 'sand', i: c + m(d), lat, r });
         spans.push([c - len / 2, c + len / 2]);
-      } else if (zone === 'glacier') {
-        // 크레바스: 길이 얼음 다리 몇 갈래로 갈라짐. 다리 밖으로 나가면 빠짐 (점프 중이면 안전)
-        const len = m(45), c = findSpot(a, b, len);
-        if (c == null) continue;
-        const bridges = n % 2 ? [[-9, -2.2], [2.2, 9]] : [[-10, -5], [-2.5, 2.5], [5, 10]];
-        // 빠지면 구간 30m 앞, 가장 가운데 다리와 줄을 맞춰 다시 시작
-        const mid = bridges.reduce((best, br) => (Math.abs((br[0] + br[1]) / 2) < Math.abs(best) ? (br[0] + br[1]) / 2 : best), 99);
-        list.push({ kind: 'crevasse', i0: c - Math.round(len / 2), i1: c + Math.round(len / 2), bridges, back: c - Math.round(len / 2) - m(30), backLat: mid });
-        spans.push([c - len / 2 - m(30), c + len / 2]);
       } else if (zone === 'city') {
         // 교차로: 버스 두 대가 서로 반대 방향으로 도로를 가로지름 (타이밍 맞춰 통과)
         const len = m(30), c = findSpot(a, b, len, { ground: true });
@@ -86,8 +78,8 @@ export function planHazards(track) {
       }
     }
   };
-  const counts = { forest: 2, desert: 2, glacier: 2, city: 1, block: 2 };
-  for (const r of track.zoneRuns) place(r.zone, r.a, r.b, track.def.theme ? counts[r.zone] : 1);
+  const counts = { forest: 2, desert: 2, city: 1, block: 2 }; // 빙하는 함정 대신 큰 높낮이·급경사 (크레바스 판정·모양 코드는 남겨둠)
+  for (const r of track.zoneRuns) if (counts[r.zone]) place(r.zone, r.a, r.b, track.def.theme ? counts[r.zone] : 1);
 
   // 월드 좌표 미리 계산
   for (const h of list) {

@@ -363,7 +363,23 @@ export class Track {
           feats.push((i) => bump(i, c, m(110), 7));
           crests.push(c);
         }
+      } else if (zone === 'glacier' && variant === 'S') {
+        // 빙하 능선 (단독 트랙): 구불구불한 산길로 +50m 정상까지 두 번에 걸쳐 오름 → 정상 대점프 →
+        // 300m 직선 급경사(60m 를 약 200m 만에, 가장 가파른 곳 약 45%)로 내리꽂힘 → 바닥 얼음 동굴 → 출발선으로
+        const TOP = 50, LOW = -10, MID = 28;
+        const rc = straightestW(a + m(450), at(0.65), 40, 220);
+        const c0 = a + m(20), mid = (c0 + rc) / 2;
+        feats.push((i) => MID * smoothstep(c0, mid - m(30), i));
+        feats.push((i) => (TOP - MID) * smoothstep(mid + m(30), rc - m(15), i));
+        feats.push((i) => (LOW - TOP) * smoothstep(rc + m(8), rc + m(205), i));
+        const t0 = rc + m(250), t1 = Math.min(t0 + m(250), b - m(150));
+        feats.push((i) => -LOW * smoothstep(t1 + m(20), b - m(5), i));
+        megaCrests.push(rc);
+        this.stunts.push({ kind: 'jump', i: rc, a: rc - m(120), b: rc + m(220) });
+        quiet.push([rc - m(130), rc + m(220)], [t0 - m(60), t1 + m(60)]);
+        for (let i = Math.floor(t0); i < t1; i++) this.tunnel[i] = 1;
       } else if (zone === 'glacier') {
+        // (대륙 횡단의 빙하 구간)
         // 빙하 능선(+10m)을 올랐다가 얼음 동굴(-3m)로 크게 내리꽂힘
         // 능선 꼭대기 = 대점프대: 스키 점프처럼 아래로 길게 날아가 동굴 입구 앞에 착지
         let t0, t1, rc;
@@ -542,7 +558,14 @@ export class Track {
 
   /** 지면 높이: 트랙 근처는 도로 높이에 맞추고(고가도로 아래는 평지), 멀어질수록 구역별 언덕 */
   groundHeight(x, z, near = this.nearest(x, z), w = zoneWeights(x, z)) {
-    const base = this.bridge[near.i] ? 0 : this.height[near.i] - 0.3 - Math.abs(this.bank[near.i]) * WALL_DIST;
+    // 트랙 근처는 정확한 위치(소수 인덱스)의 도로 높이로 → 급경사에서도 지면이 도로를 뚫고 올라오지 않음
+    let base = 0;
+    if (near.d < 115) {
+      const loc = this.locate(x, z, near.i);
+      const i = Math.round(loc.f) % this.N;
+      // 지면 격자(약 9m)를 직선으로 이으면 오목한 곳에서 도로 위로 뜰 수 있어서, 가파를수록 조금 더 낮춤
+      base = this.bridge[i] ? 0 : this.heightAt(loc.f) - 0.3 - Math.abs(this.bankAt(loc.f)) * WALL_DIST - Math.abs(this.slopeAt(loc.f)) * 2.5;
+    }
     const amp = blendValue(w, 'hill');
     const n = (Math.sin(x * 0.012 + 1.1) * Math.cos(z * 0.010 + 0.4) + 0.6 * Math.sin((x * 0.7 + z) * 0.021) + 1.6) / 3.2;
     const t = smoothstep(WALL_DIST + 2, 110, near.d);
