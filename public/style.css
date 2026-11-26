@@ -295,3 +295,5 @@ body.offline #copyLink { display: none; }
 .settingsRow label { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; margin: 0; font-size: 11px; color: var(--muted); }
 .settingsRow label b { color: var(--text); font-variant-numeric: tabular-nums; }
 .settingsRow input[type=range] { width: 100%; margin: 4px 0 0; padding: 0; border: 0; background: none; accent-color: var(--accent); }
+.settingsRow select { width: 100%; margin: 4px 0 0; padding: 3px 6px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.08); color: var(--text); font-size: 12px; }
+.settingsRow select option { color: #111; }

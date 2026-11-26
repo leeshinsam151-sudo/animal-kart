@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { TRACKS, DEFAULT_TRACK, trackById } from './tracks.js';
 import { planHazards, buildHazardMeshes } from './hazards.js';
+import { buildTown, buildClockTower } from './town.js';
 export { TRACKS, DEFAULT_TRACK, trackById };
 
 export const ROAD_HALF = 10;   // 도로 반폭 (m) - 6명이 3대씩 나란히 달릴 수 있는 폭
@@ -30,7 +31,7 @@ export const ZONES = [
   },
   {
     id: 'city', name: '도시', label: 'CITY', emoji: '🏙️', center: [520, 280],
-    ground: 0x7d838c, runoff: 0x9ca3ad, road: 0x8c919a, wall: 0xff6b6b, gate: 0x6c5ce7, map: '#b9a7ff',
+    ground: 0x93b87a, runoff: 0x9ca3ad, road: 0x8c919a, wall: 0xff6b6b, gate: 0x6c5ce7, map: '#b9a7ff',
     sky: 0xbfcdf0, fog: [220, 1000], hemiSky: 0xe8ecff, hemiGround: 0x6b6f7a, hill: 0, grip: 1, offroadMax: 26,
   },
   {
@@ -129,6 +130,31 @@ function part(geo, color, { pos = [0, 0, 0], rot = [0, 0, 0], scale = [1, 1, 1] 
 }
 const merge = (parts) => mergeGeometries(parts);
 
+/** 위치(x, z)로 size m 구역마다 나눔 → 구역별 InstancedMesh 는 화면·그림자 밖이면 통째로 안 그려짐 */
+export function byChunk(items, size = 220) {
+  const m = new Map();
+  for (const it of items) {
+    const k = `${Math.floor(it.x / size)},${Math.floor(it.z / size)}`;
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(it);
+  }
+  return [...m.values()];
+}
+
+/** 둥근 나무 세트 (d: 덩어리 구의 세분 단계) */
+function fluffy(d, suffix) {
+  const ico = (r) => new THREE.IcosahedronGeometry(r, d);
+  const TRUNK = 0x6b4a2b;
+  const blobs = (list) => list.map(([x, y, z, r, c]) => part(ico(r), c, { pos: [x, y, z] }));
+  return {
+    ['fluffyTree' + suffix]: merge([part(new THREE.CylinderGeometry(0.3, 0.45, 3, 8), TRUNK, { pos: [0, 1.5, 0] }),
+      ...blobs([[0, 4.6, 0, 2.0, 0x4f9e3a], [1.5, 4.1, 0.5, 1.5, 0x5cae44], [-1.4, 4.2, -0.4, 1.55, 0x478f35], [0.3, 5.9, -0.6, 1.45, 0x6bbd4f], [-0.4, 4.0, 1.4, 1.3, 0x58a842]])]),
+    ['fluffyBush' + suffix]: merge(blobs([[0, 0.7, 0, 1.1, 0x4c9a3f], [0.95, 0.55, 0.35, 0.8, 0x5aab47], [-0.85, 0.5, -0.2, 0.75, 0x438c37]])),
+    ['blossom' + suffix]: merge([part(new THREE.CylinderGeometry(0.28, 0.42, 3, 8), 0x7a4e35, { pos: [0, 1.5, 0] }),
+      ...blobs([[0, 4.5, 0, 1.9, 0xf7b6cf], [1.4, 4.0, 0.5, 1.4, 0xffc8da], [-1.3, 4.1, -0.4, 1.45, 0xf2a3c2], [0.3, 5.7, -0.5, 1.3, 0xffd6e4]])]),
+  };
+}
+
 function buildPrototypes() {
   const cyl = (r1, r2, h, s = 7) => new THREE.CylinderGeometry(r1, r2, h, s);
   const cone = (r, h, s = 7) => new THREE.ConeGeometry(r, h, s);
@@ -176,14 +202,17 @@ function buildPrototypes() {
       part(new THREE.BoxGeometry(5, 1.4, 5), 0x2fbf71, { pos: [0, 3.6, 0] }), part(new THREE.BoxGeometry(3.6, 1.4, 3.6), 0x3ed47f, { pos: [0, 5.0, 0] }),
       part(new THREE.BoxGeometry(2.2, 1.4, 2.2), 0x2fbf71, { pos: [0, 6.4, 0] }),
       ...[[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]].map(([x, z]) => part(cyl(0.3, 0.3, 0.3, 8), 0x3ed47f, { pos: [x, 7.25, z] }))]),
+    // 뭉게뭉게한 나무 (둥근 덩어리 여러 개, 부드러운 음영) - 그래픽 '높음'. Lo = 멀리 있는 것용 (삼각형 1/4)
+    ...fluffy(1, ''), ...fluffy(0, 'Lo'),
     lamp: merge([part(cyl(0.12, 0.16, 8, 6), 0x555a66, { pos: [0, 4, 0] }), part(new THREE.BoxGeometry(0.15, 0.15, 2.2), 0x555a66, { pos: [0, 8, 1.0] }),
       part(new THREE.BoxGeometry(0.5, 0.22, 0.9), 0xfff2b0, { pos: [0, 7.85, 1.9] })]),
   };
 }
 
 export class Track {
-  constructor(scene, renderer, def = trackById(DEFAULT_TRACK)) {
+  constructor(scene, renderer, def = trackById(DEFAULT_TRACK), opts = {}) {
     this.def = def;
+    this.detail = opts.detail ?? true; // 그래픽 '높음': 뭉게뭉게한 나무·벚꽃나무 등 디테일 배경
     this.id = def.id;
     this.laps = def.laps;
     THEME = def.theme ? ZONES.findIndex((zn) => zn.id === def.theme) : -1;
@@ -616,6 +645,24 @@ export class Track {
     const runoffMat = new THREE.MeshStandardMaterial({ roughness: 1, vertexColors: true, ...flat, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
     add(this.ribbon(ROAD_HALF + CURB_W, WALL_DIST - 0.3, 0.01, 0.01, 10, 'runoff'), runoffMat);
     add(this.ribbon(-WALL_DIST + 0.3, -ROAD_HALF - CURB_W, 0.01, 0.01, 10, 'runoff'), runoffMat);
+    // 도시 보도: 벽돌 포장 무늬
+    const cityFlags = Uint8Array.from({ length: this.N }, (_, i) => (ZONES[this.zone[i]].id === 'city' ? 1 : 0));
+    const cityRuns = this.spans(cityFlags);
+    if (cityRuns.length) {
+      const paver = canvasTexture(128, 128, (ctx, w, h) => {
+        ctx.fillStyle = '#b9b2a8'; ctx.fillRect(0, 0, w, h);
+        for (let row = 0; row < 8; row++) for (let x = (row % 2) * -16; x < w; x += 32) {
+          ctx.fillStyle = ['#d9d1c4', '#cfc5b6', '#e2dbcf', '#c9beae'][(row * 3 + x / 32) & 3];
+          ctx.fillRect(x + 1.5, row * 16 + 1.5, 29, 13);
+        }
+      }, renderer);
+      paver.repeat.set(3, 1);
+      const paverMat = new THREE.MeshStandardMaterial({ map: paver, roughness: 0.95, ...flat, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+      for (const [a, b] of cityRuns) {
+        add(this.ribbon(ROAD_HALF + CURB_W, WALL_DIST - 0.3, 0.02, 0.02, 4, null, a, b), paverMat);
+        add(this.ribbon(-WALL_DIST + 0.3, -ROAD_HALF - CURB_W, 0.02, 0.02, 4, null, a, b), paverMat);
+      }
+    }
 
     // 방호벽 (구역별 색)
     const wallTex = canvasTexture(128, 32, (ctx, w, h) => {
@@ -947,6 +994,26 @@ export class Track {
     const w = ZONES.map(() => 0);
     const pick = (arr) => { let r = rand(), acc = 0; for (const [k, p] of arr) { acc += p; if (r < acc) return k; } return null; };
     let snowmen = 0;
+    // 도시마다 시계탑 하나 (트랙 옆 40m, 그 자리엔 건물 안 세움)
+    const towers = [];
+    for (const r of this.zoneRuns || []) {
+      if (r.zone !== 'city') continue;
+      let done = false;
+      for (const frac of [0.08, 0.86, 0.3, 0.5, 0.7, 0.2]) {
+        for (const side of [1, -1]) {
+          if (done) break;
+          const i = Math.floor(r.a + (r.b - r.a) * frac);
+          const p = this.points[i], sd = this.sides[i];
+          const x = p.x + sd.x * side * (WALL_DIST + 24), z = p.z + sd.z * side * (WALL_DIST + 24);
+          if (this.nearest(x, z).d < WALL_DIST + 14) continue; // 다른 구간 도로와 너무 가까움
+          towers.push({ x, z, ry: Math.atan2(-sd.x * side, -sd.z * side) });
+          done = true;
+          for (let gx = -1; gx <= 1; gx++) for (let gz = -1; gz <= 1; gz++) occupied.add(`${Math.round(x / 24) + gx},${Math.round(z / 24) + gz}`);
+        }
+        if (done) break;
+      }
+    }
+    this.towers = towers;
 
     // 트랙을 따라 양옆에 흩뿌리기 → 구역에 맞는 오브젝트 선택
     // 시도 횟수는 트랙 길이에 비례 (짧은 테마 트랙도 대륙 횡단과 같은 밀도 → 폰에서도 가볍게)
@@ -969,7 +1036,10 @@ export class Track {
       for (; zi < ZONES.length - 1 && r > w[zi]; zi++) r -= w[zi];
       const zone = ZONES[zi].id;
       let type;
-      if (zone === 'forest') type = pick([['pine', 0.42], ['roundTree', 0.3], ['bush', 0.18], ['rock', 0.06], ['mushroom', 0.04]]);
+      if (zone === 'forest') {
+        type = this.detail ? pick([['pine', 0.38], ['fluffyTree', 0.3], ['blossom', 0.04], ['fluffyBush', 0.18], ['rock', 0.06], ['mushroom', 0.04]])
+          : pick([['pine', 0.42], ['roundTree', 0.3], ['bush', 0.18], ['rock', 0.06], ['mushroom', 0.04]]);
+      }
       else if (zone === 'glacier') type = pick([['snowyPine', 0.5], ['iceberg', 0.25], ['iceSpike', 0.22], ['snowman', 0.03]]);
       else if (zone === 'desert') {
         type = pick([['cactus', 0.38], ['desertRock', 0.32], ['palm', 0.12], ['mesa', 0.18]]);
@@ -992,7 +1062,7 @@ export class Track {
           buildings[kind].push({ x, z, sx: bw, sy: h, sz: bd, ry: Math.atan2(t.x, t.z), color: new THREE.Color().setHSL(rand(), 0.25, 0.55 + rand() * 0.25) });
           continue;
         }
-        type = pick([['roundTree', 0.5], ['bush', 0.5]]);
+        type = this.detail ? pick([['blossom', 0.3], ['fluffyTree', 0.25], ['fluffyBush', 0.45]]) : pick([['roundTree', 0.5], ['bush', 0.5]]);
       }
       if (!type) continue;
       if (type === 'snowman' && snowmen++ > 14) continue;
@@ -1016,6 +1086,9 @@ export class Track {
 
     const dummy = new THREE.Object3D();
     const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, flatShading: true });
+    const softMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }); // 둥근 나무: 부드러운 음영
+    const SOFT = new Set(['fluffyTree', 'fluffyBush', 'blossom']);
+    const tint = new THREE.Color();
     const iceMat = new THREE.MeshStandardMaterial({
       vertexColors: true, roughness: 0.08, metalness: 0.1, transparent: true, opacity: 0.85, flatShading: true,
       emissive: 0x2a6a8a, emissiveIntensity: 0.35,
@@ -1023,63 +1096,29 @@ export class Track {
     // 트랙 가까운 것만 그림자를 드리워서 그림자 패스 부담을 줄임
     for (const [type, all] of Object.entries(lists)) {
       for (const near of [true, false]) {
-        const items = all.filter((it) => !!it.near === near);
-        if (!items.length) continue;
-        const im = new THREE.InstancedMesh(proto[type], type === 'iceSpike' ? iceMat : mat, items.length);
+        const geo = !near && proto[type + 'Lo'] ? proto[type + 'Lo'] : proto[type]; // 먼 둥근 나무는 가벼운 모양
+        for (const items of byChunk(all.filter((it) => !!it.near === near))) {
+        const im = new THREE.InstancedMesh(geo, type === 'iceSpike' ? iceMat : SOFT.has(type) ? softMat : mat, items.length);
         items.forEach((it, n) => {
           dummy.position.set(it.x, it.y, it.z);
           dummy.rotation.set(0, it.ry, 0);
           dummy.scale.set(it.sx, it.sy, it.sz);
           dummy.updateMatrix();
           im.setMatrixAt(n, dummy.matrix);
+          // 같은 종류도 그루마다 색이 조금씩 다르게 (자연스럽게)
+          if (SOFT.has(type)) im.setColorAt(n, tint.setHSL(0, 0, 0.88 + ((it.x * 7.13 + it.z * 3.71) % 1 + 1) % 1 * 0.24));
         });
         im.castShadow = near && type !== 'mesa';
         im.receiveShadow = true;
         this.group.add(im);
+        }
       }
     }
 
-    this.buildCity(buildings);
+    buildTown(this.group, buildings, rand, this.detail);
+    for (const t of towers) buildClockTower(this.group, t.x, this.groundHeight(t.x, t.z), t.z, t.ry);
     this.buildBricks(brickSpots);
     this.buildMountains();
-  }
-
-  buildCity(buildings) {
-    const dummy = new THREE.Object3D();
-    const roofMat = new THREE.MeshStandardMaterial({ color: 0x5c606a, roughness: 0.9 });
-    const facade = (cols, rows) => {
-      const c = document.createElement('canvas');
-      c.width = 128; c.height = 256;
-      const g = c.getContext('2d');
-      g.fillStyle = '#ffffff'; g.fillRect(0, 0, 128, 256);
-      const cw = 128 / cols, ch = 256 / rows;
-      for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
-        const lit = Math.random() < 0.3;
-        g.fillStyle = lit ? '#ffe9a8' : '#3c4a63';
-        g.fillRect(x * cw + cw * 0.2, y * ch + ch * 0.22, cw * 0.6, ch * 0.56);
-      }
-      const t = new THREE.CanvasTexture(c);
-      t.colorSpace = THREE.SRGBColorSpace;
-      return t;
-    };
-    const variants = { low: facade(4, 4), mid: facade(5, 9), tall: facade(6, 20) };
-    const box = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
-    for (const [kind, list] of Object.entries(buildings)) {
-      if (!list.length) continue;
-      const wallMat = new THREE.MeshStandardMaterial({ map: variants[kind], roughness: 0.6, metalness: 0.1 });
-      const mats = [wallMat, wallMat, roofMat, roofMat, wallMat, wallMat];
-      const im = new THREE.InstancedMesh(box, mats, list.length);
-      list.forEach((b, n) => {
-        dummy.position.set(b.x, 0, b.z);
-        dummy.rotation.set(0, b.ry, 0);
-        dummy.scale.set(b.sx, b.sy, b.sz);
-        dummy.updateMatrix();
-        im.setMatrixAt(n, dummy.matrix);
-        im.setColorAt(n, b.color);
-      });
-      im.castShadow = im.receiveShadow = true;
-      this.group.add(im);
-    }
   }
 
   /** 블록 세상: 돌기(스터드)가 달린 장난감 벽돌을 탑이나 더미로 쌓기 */
@@ -1105,15 +1144,15 @@ export class Track {
           : { x: sp.x + (rand() - 0.5) * 0.8 * s, y, z: sp.z + (rand() - 0.5) * 0.8 * s, ry: rot };
         b.s = s;
         b.color = palette[Math.floor(rand() * palette.length)];
-        (sp.d < 70 ? near : far).push(b);
+        (sp.d < (this.detail ? 70 : 30) ? near : far).push(b); // 낮음: 돌기 달린 벽돌은 아주 가까운 것만
         y += 1.2 * s;
         rot += Math.PI / 2 * (rand() < 0.5 ? 1 : 0); // 엇갈려 쌓기
       }
     }
     const mat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05 }); // 반짝이는 플라스틱
     const d = new THREE.Object3D(), c = new THREE.Color();
-    for (const [list, cast, geo] of [[near, true, studded], [far, false, plain]]) {
-      if (!list.length) continue;
+    for (const [all, cast, geo] of [[near, true, studded], [far, false, plain]]) {
+      for (const list of byChunk(all)) {
       const im = new THREE.InstancedMesh(geo, mat, list.length);
       list.forEach((b, i) => {
         d.position.set(b.x, b.y, b.z); d.rotation.set(0, b.ry, 0); d.scale.setScalar(b.s); d.updateMatrix();
@@ -1123,6 +1162,7 @@ export class Track {
       im.castShadow = cast;
       im.receiveShadow = true;
       this.group.add(im);
+      }
     }
   }
 

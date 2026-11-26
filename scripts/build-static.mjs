@@ -13,6 +13,10 @@ for (const f of [
   'build/three.core.js',
   'examples/jsm/environments/RoomEnvironment.js',
   'examples/jsm/utils/BufferGeometryUtils.js',
+  // 그래픽 '높음' 후처리 (앰비언트 오클루전 + 블룸)
+  ...['EffectComposer', 'RenderPass', 'GTAOPass', 'UnrealBloomPass', 'OutputPass', 'ShaderPass', 'Pass', 'MaskPass'].map((f) => `examples/jsm/postprocessing/${f}.js`),
+  ...['GTAOShader', 'PoissonDenoiseShader', 'CopyShader', 'LuminosityHighPassShader', 'OutputShader'].map((f) => `examples/jsm/shaders/${f}.js`),
+  'examples/jsm/math/SimplexNoise.js',
 ]) {
   const to = path.join(dist, 'vendor/three', f);
   mkdirSync(path.dirname(to), { recursive: true });

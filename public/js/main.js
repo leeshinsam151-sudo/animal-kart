@@ -11,6 +11,7 @@ import { AudioSys } from './audio.js';
 import { UI, COLORS } from './ui.js';
 import { NetClock, sampleAt, smoothPosition, lerpAngle, predict, leadTime } from './interp.js';
 import { updateHazards, applyHazards } from './hazards.js';
+import { Graphics, createSky, initialQuality } from './graphics.js';
 
 const SEND_INTERVAL = 50;   // 내 상태 전송 주기 (ms)
 // 원격 카트 보간: 서버 시각 기준 정렬 + 흔들림에 맞춘 지연 자동 조절 + 짧은 예측 (interp.js)
@@ -55,8 +56,14 @@ Object.assign(sun.shadow.camera, { left: -70, right: 70, top: 70, bottom: -70, n
 sun.shadow.bias = -0.0005;
 scene.add(sun, sun.target);
 const SUN_OFFSET = new THREE.Vector3(80, 150, 60);
+// 그래픽 품질 (높음: 후처리·부드러운 그림자·디테일 배경 / 낮음: 폰용) + 그라데이션 하늘·구름
+const gfx = new Graphics(renderer, scene, camera, sun);
+gfx.setQuality(initialQuality(), false);
+const sky = createSky(scene);
+sky.uniforms.sunDir.value.copy(SUN_OFFSET).normalize();
+const trackOpts = () => ({ detail: gfx.quality === 'high' });
 
-let track = new Track(scene, renderer, trackById(DEFAULT_TRACK)); // 로비에서 방장이 고른 트랙으로 바뀜 (loadTrack)
+let track = new Track(scene, renderer, trackById(DEFAULT_TRACK), trackOpts()); // 로비에서 방장이 고른 트랙으로 바뀜 (loadTrack)
 const ui = new UI(track);
 const net = new Net();
 const sound = new AudioSys(); // 엔진음·효과음·배경음악
@@ -76,12 +83,12 @@ items.getPos = (id) => {
 const snow = new Snow(scene);
 
 /** 다른 트랙으로 교체 (같은 트랙이면 아무것도 안 함). 바꿨으면 true */
-function loadTrack(id) {
-  if (!id || track.id === id) return false;
+function loadTrack(id, force = false) {
+  if (!id || (track.id === id && !force)) return false;
   clearRace();
   clearShowroom();
   track.dispose();
-  track = new Track(scene, renderer, trackById(id));
+  track = new Track(scene, renderer, trackById(id), trackOpts());
   ui.setTrack(track);
   items.setTrack(track);
   net.offlineContext.track = track; // 연습 모드 봇도 새 트랙에서 달림
@@ -138,6 +145,16 @@ steerInput.addEventListener('input', () => {
   showSteer();
   try { localStorage.setItem('racer-steer', String(steerScale)); } catch {}
   if (game.local) game.local.ctrl.steerScale = steerScale;
+});
+
+// 그래픽 품질: 렌더링은 바로, 배경 디테일은 트랙을 다시 만들어야 해서 레이스 중이 아닐 때 바로 / 레이스 중이면 다음 트랙부터
+const qualitySel = document.getElementById('quality');
+qualitySel.value = gfx.quality;
+qualitySel.addEventListener('change', () => {
+  gfx.setQuality(qualitySel.value);
+  const racing = game.local && (game.phase === 'racing' || game.phase === 'countdown');
+  if (!racing) { loadTrack(track.id, true); if (game.phase === 'lobby') lobbyShowroom(); else if (game.phase === 'menu') menuShowroom(); }
+  else ui.toast('배경 디테일은 다음 레이스부터 바뀌어요', 1500);
 });
 
 // 배경음악 / 효과음 볼륨 (브라우저에 기억)
@@ -816,7 +833,8 @@ function frame(now) {
   sun.target.position.set(focus.x, focus.y || 0, focus.z);
   sun.position.copy(sun.target.position).add(SUN_OFFSET);
 
-  renderer.render(scene, camera);
+  if (window.__dbg && window.__cam) { camera.position.set(...window.__cam.pos); camera.lookAt(...window.__cam.at); } // 테스트용 자유 카메라
+  gfx.render();
   requestAnimationFrame(frame);
 }
 
@@ -1066,6 +1084,7 @@ function updateAtmosphere(dt) {
   const k = 1 - Math.exp(-dt * 2);
   blendColor(_w, 'sky', _sky);
   scene.background.lerp(_sky, k);
+  sky.update(camera, scene.background, dt);
   scene.fog.color.copy(scene.background);
   scene.fog.near += (ZONES.reduce((s, zn, i) => s + zn.fog[0] * _w[i], 0) - scene.fog.near) * k;
   scene.fog.far += (ZONES.reduce((s, zn, i) => s + zn.fog[1] * _w[i], 0) - scene.fog.far) * k;
@@ -1091,7 +1110,7 @@ function sendState(now) {
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
+  gfx.setSize(innerWidth, innerHeight);
 });
 
 menuShowroom();
@@ -1099,4 +1118,4 @@ refreshGarage();
 requestAnimationFrame(frame);
 
 // 디버그: ?debug 로 접속하면 콘솔에서 window.__dbg 로 상태 접근 (순간이동 테스트 등)
-if (new URLSearchParams(location.search).has('debug')) window.__dbg = { game, track, items, camera, renderer, net, netClock, sound };
+if (new URLSearchParams(location.search).has('debug')) window.__dbg = { game, track, items, camera, renderer, net, netClock, sound, gfx };
