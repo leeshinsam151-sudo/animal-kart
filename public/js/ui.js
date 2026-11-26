@@ -176,6 +176,13 @@ export class UI {
     $('itemName').textContent = first && first !== '?' ? ITEM_INFO[first].name : '';
   }
 
+  /** 내 머리 위 번개 구름: 남은 초 (없으면 null) */
+  cloudWarning(sec) {
+    const on = sec != null;
+    if (on !== this.cloudOn) { $('cloudWarn').classList.toggle('hidden', !on); this.cloudOn = on; }
+    if (on) { const t = sec.toFixed(1); if ($('cloudSec').textContent !== t) $('cloudSec').textContent = t; }
+  }
+
   missileWarning(on) {
     $('missileWarn').classList.toggle('hidden', !on);
     document.body.classList.toggle('missile-danger', on);

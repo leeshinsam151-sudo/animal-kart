@@ -269,6 +269,15 @@ body.offline #copyLink { display: none; }
 #lobby #lobbyMsg:empty { display: none; }
 
 #missileWarn small { display: block; font-size: 13px; font-weight: 600; opacity: 0.9; margin-top: 2px; }
+/* 번개 구름 경고 (미사일 경고와 겹치지 않게 조금 아래) */
+#cloudWarn {
+  position: absolute; left: 50%; top: 42%; transform: translateX(-50%); text-align: center;
+  font-size: 26px; font-weight: 900; color: #fff6c4; padding: 6px 22px; border-radius: 12px;
+  background: rgba(40, 44, 60, 0.85); border: 2px solid #ffd34d; white-space: nowrap;
+}
+#cloudWarn b { color: #ffd34d; font-variant-numeric: tabular-nums; }
+#cloudWarn small { display: block; font-size: 12px; font-weight: 600; opacity: 0.85; margin-top: 2px; white-space: normal; }
+@media (max-width: 600px) { #cloudWarn { font-size: 18px; top: 36%; } }
 
 /* 아이템 둘째 칸 (다음 아이템) */
 #itemSlot2 {

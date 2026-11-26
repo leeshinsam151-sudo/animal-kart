@@ -174,6 +174,11 @@ export class AudioSys {
   throwIt() { this.noise(0.35, { vol: 0.12, type: 'bandpass', freq: 600, slideTo: 2000, q: 2 }); }
   splash(v = 1) { this.noise(0.6, { vol: 0.35 * v, type: 'lowpass', freq: 3000, slideTo: 300 }); this.tone(200, 0.2, { type: 'sine', vol: 0.15 * v, slideTo: 80 }); }
   trapped() { for (let i = 0; i < 5; i++) this.tone(400 + Math.random() * 500, 0.08, { type: 'sine', vol: 0.08, slideTo: 900, when: i * 0.07 }); }
+  shield() { [392, 523, 659, 784].forEach((f, i) => this.tone(f, 0.5, { type: 'sine', vol: 0.07, when: i * 0.04 })); this.noise(0.5, { vol: 0.05, type: 'highpass', freq: 5000 }); }
+  shieldBreak() { this.tone(1200, 0.25, { type: 'triangle', vol: 0.12, slideTo: 400 }); this.noise(0.25, { vol: 0.12, type: 'highpass', freq: 3000 }); }
+  magnet() { this.tone(110, 0.9, { type: 'sawtooth', vol: 0.06, slideTo: 440 }); this.tone(220, 0.9, { type: 'square', vol: 0.03, slideTo: 880, when: 0.05 }); }
+  cloud() { this.noise(1.2, { vol: 0.12, type: 'lowpass', freq: 400, slideTo: 150 }); this.tone(70, 1, { type: 'sine', vol: 0.12, slideTo: 50 }); }
+  thunder(v = 1) { this.noise(0.12, { vol: 0.5 * v, type: 'highpass', freq: 2500 }); this.noise(1.4, { vol: 0.45 * v, freq: 900, slideTo: 60, when: 0.05 }); this.tone(55, 1.2, { type: 'sine', vol: 0.35 * v, slideTo: 30, when: 0.05 }); }
   pop() { this.tone(900, 0.08, { type: 'sine', vol: 0.15, slideTo: 300 }); this.noise(0.08, { vol: 0.1, type: 'highpass', freq: 2000 }); }
   missile() { this.noise(0.5, { vol: 0.15, type: 'bandpass', freq: 400, slideTo: 3000, q: 1.5 }); this.tone(200, 0.4, { type: 'sawtooth', vol: 0.05, slideTo: 800 }); }
   explosion(v = 1) { this.noise(0.9, { vol: 0.5 * v, freq: 1800, slideTo: 100 }); this.tone(90, 0.6, { type: 'sine', vol: 0.4 * v, slideTo: 30 }); }

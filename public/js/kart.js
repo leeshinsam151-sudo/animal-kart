@@ -529,6 +529,8 @@ function bake(group, keep = []) {
   }
 }
 
+let SHIELD_PARTS = null;
+
 export function createKart({ color = '#e63946', character = 'panda' } = {}) {
   const ch = CHARACTERS[character] || CHARACTERS.panda;
   const style = KART_STYLES[character] || {};
@@ -645,6 +647,18 @@ export function createKart({ color = '#e63946', character = 'panda' } = {}) {
   bubble.visible = false;
   root.add(bubble);
 
+  // 방어막: 금빛 반투명 구 + 육각 무늬 테두리
+  // (모든 카트가 같은 지오메트리·재질을 공유 → 카트를 만들고 지워도 메모리가 늘지 않음)
+  SHIELD_PARTS ||= [
+    [new THREE.IcosahedronGeometry(3, 3), new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide })],
+    [new THREE.IcosahedronGeometry(3.05, 1), new THREE.MeshBasicMaterial({ color: 0xffe9a0, wireframe: true, transparent: true, opacity: 0.55, depthWrite: false })],
+  ];
+  const shield = new THREE.Group();
+  for (const [g, m] of SHIELD_PARTS) shield.add(new THREE.Mesh(g, m));
+  shield.position.y = 1.9;
+  shield.visible = false;
+  root.add(shield);
+
   // 함께 움직이는 부품끼리 합치기: 카트 1대 메시 약 118개 → 약 25개
   bake(head);
   for (const a of arms) bake(a);
@@ -664,7 +678,10 @@ export function createKart({ color = '#e63946', character = 'panda' } = {}) {
      * @param o.spin 바퀴 회전각, o.steer 조향(+왼쪽), o.roll/o.pitch 차체 기울기,
      *          o.speed 0~1 속도 비율, o.t 시간(초), o.cheer 만세 동작, o.look 고개 돌림
      */
-    animate({ spin = 0, steer = 0, roll = 0, pitch = 0, speed = 0, t = 0, cheer = false, look = 0, dt = 0.016, spinAngle = 0, trapped = false, blast = 0 }) {
+    animate({ spin = 0, steer = 0, roll = 0, pitch = 0, speed = 0, t = 0, cheer = false, look = 0, dt = 0.016, spinAngle = 0, trapped = false, blast = 0, shielded = false }) {
+      // 방어막: 천천히 돌며 숨쉬듯 커졌다 작아짐
+      shield.visible = shielded;
+      if (shielded) { shield.rotation.y = t * 0.8; shield.rotation.x = Math.sin(t * 0.6) * 0.3; shield.scale.setScalar(1 + Math.sin(t * 6) * 0.03); }
       // 피격 연출: 스핀(바나나) / 물방울에 떠오름(물폭탄)
       model.rotation.y = spinAngle;
       bubble.visible = trapped;

@@ -8,7 +8,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "build:static": "node scripts/build-static.mjs",
-    "test": "node test/interp.test.mjs && node test/collision.test.mjs"
+    "test": "node test/interp.test.mjs && node test/collision.test.mjs && node test/items.test.mjs"
   },
   "engines": {
     "node": ">=18"

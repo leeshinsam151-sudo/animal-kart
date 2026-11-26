@@ -1,9 +1,9 @@
 // 오프라인 연습 모드: 서버(server.js)와 같은 메시지를 브라우저 안에서 흉내 내고, AI 봇 5명을 운전시킴
 // - 멀티플레이 서버 없이도 레이스/아이템을 테스트할 수 있음
-import { CarController } from './physics.js';
+import { CarController, SHIELD_TIME, MAGNET_TIME } from './physics.js';
 import { CHARACTER_IDS, CHARACTERS } from './kart.js';
 import { COLORS } from './ui.js';
-import { BOMB_RANGE, BOMB_FLIGHT, MISSILE_LOCK_RANGE, MISSILE_HIT_HEIGHT, BLOCK_RADIUS } from './items.js';
+import { BOMB_RANGE, BOMB_FLIGHT, MISSILE_LOCK_RANGE, MISSILE_HIT_HEIGHT, BLOCK_RADIUS, CLOUD_MS } from './items.js';
 import { DEFAULT_TRACK, trackById } from './tracks.js';
 
 const COUNTDOWN_MS = 3000;
@@ -15,7 +15,8 @@ const BANANA_RADIUS = 2.1;
 const BOMB_FLIGHT_MS = BOMB_FLIGHT * 1000; // 게임과 같은 값 (items.js)
 const SPLASH_RADIUS = 7.5;
 const MISSILE_HIT_RADIUS = 3;
-const FLAG = { drift: 1, boost: 2, spin: 4, trap: 8, blast: 16 };
+const FLAG = { drift: 1, boost: 2, spin: 4, trap: 8, blast: 16, shield: 32, magnet: 64 };
+const MAGNET_RANGE = 200;
 
 const wrapAngle = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
 
@@ -104,6 +105,7 @@ export class LocalServer {
       case 'missileHit':
         if (this.missiles.delete(msg.id)) this.emit({ type: 'missileGone', id: msg.id, victim: 1 });
         break;
+      case 'cloudPass': this.passCloud(1, msg.to); break;
     }
   }
 
@@ -116,6 +118,7 @@ export class LocalServer {
     this.bananas.clear();
     this.bombs = [];
     this.missiles.clear();
+    this.dropCloud();
     this.raceLaps = trackById(this.trackId).laps;
     // 내가 맨 뒤에서 출발 → 앞에 쫓아갈 상대가 있음
     const order = [...this.bots, this.me];
@@ -148,6 +151,7 @@ export class LocalServer {
     p.finishTime = performance.now() - this.raceStart;
     p.progress = this.laps + 1 - this.finishOrder.length * 0.001;
     this.finishOrder.push(p.id);
+    this.dropCloud(p.id); // 완주하면 구름은 사라짐
     this.emit({ type: 'finished', id: p.id, name: p.name, time: p.finishTime, place: this.finishOrder.length });
     if (this.finishOrder.length === 1) this.later(AFTER_FIRST_FINISH_MS, () => this.endRace());
     const all = [...this.players.values()].filter((v) => v.racing);
@@ -160,6 +164,8 @@ export class LocalServer {
     if (this.phase !== 'racing') return;
     this.timers.forEach(clearTimeout);
     this.timers = [];
+    clearTimeout(this.cloud?.timer);
+    this.cloud = null;
     this.phase = 'results';
     const racers = [...this.players.values()].filter((p) => p.racing);
     const done = racers.filter((p) => p.finished).sort((a, b) => a.finishTime - b.finishTime);
@@ -193,7 +199,39 @@ export class LocalServer {
     } else if (msg.kind === 'missile') {
       this.missiles.add(id);
       this.emit({ type: 'missile', id, owner, target: msg.target ?? null, x: msg.x, z: msg.z, idx: msg.idx, lat: msg.lat, cid: msg.cid });
+    } else if (msg.kind === 'cloud') {
+      // 1등(쓴 사람이 1등이면 2등) 머리 위로
+      const list = [...this.players.values()].filter((p) => p.racing && !p.finished && p.id !== owner).sort((a, b) => b.progress - a.progress);
+      if (list.length) this.setCloud(list[0].id, CLOUD_MS, { owner });
     }
+  }
+
+  // ---------- 번개 구름 (서버와 같은 규칙) ----------
+  setCloud(holder, ms, extra = {}) {
+    clearTimeout(this.cloud?.timer);
+    const timer = setTimeout(() => {
+      if (this.cloud?.timer !== timer) return;
+      this.cloud = null;
+      const bot = this.players.get(holder);
+      if (bot?.bot && bot.racing && !bot.finished) bot.ctrl.spinOut(); // 방어막이 있으면 막힘
+      this.emit({ type: 'cloudStrike', holder });
+    }, ms);
+    this.cloud = { holder, until: performance.now() + ms, timer, passedAt: performance.now() };
+    this.emit({ type: 'cloud', holder, ms, ...extra });
+  }
+
+  passCloud(from, to) {
+    const c = this.cloud, target = this.players.get(to);
+    if (this.phase !== 'racing' || !c || c.holder !== from || !target?.racing || target.finished || to === from) return;
+    if (performance.now() - c.passedAt < 600) return;
+    this.setCloud(to, Math.max(1500, c.until - performance.now()), { from, passed: true });
+  }
+
+  dropCloud(id = null) {
+    if (!this.cloud || (id != null && this.cloud.holder !== id)) return;
+    clearTimeout(this.cloud.timer);
+    this.cloud = null;
+    this.emit({ type: 'cloudGone' });
   }
 
   /** 진행도 순으로 정렬했을 때 p 바로 앞 사람 */
@@ -206,10 +244,9 @@ export class LocalServer {
   rollBotItem(bot) {
     const list = [...this.players.values()].filter((v) => v.racing).sort((a, b) => b.progress - a.progress);
     const pos = list.indexOf(bot);
-    const r = Math.random();
-    if (r < 0.2) return 'charge';
-    if (pos === 0) return r < 0.75 ? 'banana' : 'bomb';
-    return r < 0.4 ? 'banana' : r < 0.7 ? 'bomb' : 'missile';
+    const pick = (pairs) => { let r = Math.random(); for (const [k, p] of pairs) { if (r < p) return k; r -= p; } return pairs[0][0]; };
+    if (pos === 0) return pick([['banana', 0.4], ['bomb', 0.2], ['shield', 0.25], ['charge', 0.15]]);
+    return pick([['banana', 0.18], ['bomb', 0.18], ['missile', 0.18], ['charge', 0.12], ['shield', 0.1], ['magnet', 0.12], ['cloud', 0.12]]);
   }
 
   botUseItem(bot, now) {
@@ -219,6 +256,18 @@ export class LocalServer {
     const ahead = this.racerAhead(bot);
     if (bot.held === 'charge') {
       c.gauge = 1; // 게이지 충전 → 다음 프레임에 부스터 획득
+    } else if (bot.held === 'shield') {
+      // 미사일이 날아오거나 번개 구름이 머리 위에 있을 때 (6초 넘게 들고 있으면 그냥 씀)
+      const danger = this.items.targeting(bot.id) || this.cloud?.holder === bot.id;
+      if (!danger && now - bot.useAt < 6000) return;
+      c.shieldTime = SHIELD_TIME;
+    } else if (bot.held === 'magnet') {
+      const gap = ahead ? (ahead.progress - bot.progress) * this.track.length : Infinity;
+      if (gap > MAGNET_RANGE && now - bot.useAt < 8000) return;
+      c.magnetTime = MAGNET_TIME;
+      bot.magnetTarget = gap <= MAGNET_RANGE ? ahead.id : null;
+    } else if (bot.held === 'cloud') {
+      this.useItem(bot.id, { kind: 'cloud' });
     } else if (bot.held === 'banana') {
       this.useItem(bot.id, { kind: 'banana', x: c.x - fx * 3.6, z: c.z - fz * 3.6 });
     } else if (bot.held === 'bomb') {
@@ -273,6 +322,8 @@ export class LocalServer {
       const steps = Math.max(1, Math.round(dt * 60));
       for (const bot of bots) {
         if (!bot.racing) continue;
+        const mt = bot.ctrl.magnetTime > 0 && bot.magnetTarget != null ? this.players.get(bot.magnetTarget) : null;
+        bot.ctrl.magnetTarget = mt ? (mt.bot ? { x: mt.ctrl.x, z: mt.ctrl.z } : { x: mt.x, z: mt.z }) : null;
         for (let k = 0; k < steps; k++) bot.ctrl.update(dt / steps, this.drive(bot, dt / steps));
         const c = bot.ctrl;
         bot.progress = bot.finished ? bot.progress : c.progress;
@@ -297,8 +348,8 @@ export class LocalServer {
       // 카트끼리 충돌 (봇 ↔ 봇, 봇 ↔ 나)
       const me = this.me;
       for (const a of bots) {
-        if (me?.racing) a.ctrl.collideWith(me.x, me.z, 0, 0, me.y ?? a.ctrl.y);
-        for (const b of bots) if (a !== b) a.ctrl.collideWith(b.ctrl.x, b.ctrl.z, b.ctrl.vx, b.ctrl.vz, b.ctrl.y);
+        if (me?.racing && a.ctrl.collideWith(me.x, me.z, 0, 0, me.y ?? a.ctrl.y)) this.passCloud(a.id, me.id);
+        for (const b of bots) if (a !== b && a.ctrl.collideWith(b.ctrl.x, b.ctrl.z, b.ctrl.vx, b.ctrl.vz, b.ctrl.y)) this.passCloud(a.id, b.id);
       }
 
       this.hazards(bots, now);
@@ -308,7 +359,8 @@ export class LocalServer {
     const ps = bots.filter((b) => b.racing && b.ctrl).map((b) => {
       const c = b.ctrl;
       const fl = (c.drifting ? FLAG.drift : 0) | (c.boosting ? FLAG.boost : 0) | (c.spinTime > 0 ? FLAG.spin : 0)
-        | (c.trapTime > 0 ? FLAG.trap : 0) | (c.blastTime > 0 ? FLAG.blast : 0);
+        | (c.trapTime > 0 ? FLAG.trap : 0) | (c.blastTime > 0 ? FLAG.blast : 0)
+        | (c.shieldTime > 0 ? FLAG.shield : 0) | (c.magnetTime > 0 ? FLAG.magnet : 0);
       return [b.id, c.x, c.z, c.heading, c.vF, c.steer, fl, b.progress, c.y];
     });
     if (ps.length) this.emit({ type: 'snap', ps });

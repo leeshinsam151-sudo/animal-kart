@@ -1,4 +1,5 @@
-// 아이템 시스템: 아이템 박스, 바나나(뒤에 설치 → 밟으면 스핀), 물폭탄(앞으로 투척 → 착지 지점 주변 갇힘)
+// 아이템 시스템: 아이템 박스, 바나나(뒤에 설치 → 밟으면 스핀), 물폭탄(앞으로 투척 → 착지 지점 주변 갇힘),
+// 미사일(앞사람 추적), 번개 구름(1등 머리 위 → 5초 뒤 번개, 부딪히면 옮겨감)
 import * as THREE from 'three';
 
 export const ITEM_INFO = {
@@ -6,8 +7,13 @@ export const ITEM_INFO = {
   bomb: { name: '물폭탄', emoji: '💧' },
   missile: { name: '미사일', emoji: '🚀' },
   charge: { name: '게이지 충전', emoji: '⚡' },
+  shield: { name: '방어막', emoji: '🛡️' },
+  magnet: { name: '자석', emoji: '🧲' },
+  cloud: { name: '번개 구름', emoji: '⛈️' },
 };
+export const CLOUD_MS = 5000; // 번개 구름: 이 시간 뒤 번개
 const BOX_RESPAWN = 4000;   // ms
+const CLOUD_GEO = new THREE.IcosahedronGeometry(1, 1);
 const BOX_RADIUS = 2.6;
 const BANANA_RADIUS = 2.1;
 export const BOMB_FLIGHT = 1.15;  // s
@@ -116,6 +122,8 @@ export class Items {
     this.splashes = [];         // 물보라 링
     this.ringGeo = new THREE.RingGeometry(0.75, 1, 40).rotateX(-Math.PI / 2);
     this.missiles = [];
+    this.cloud = null;          // { holder, endAt, obj } - 번개 구름 (방에 하나)
+    this.bolts = [];            // 번개 줄기 연출
     this.getPos = () => null; // id → { x, z, hint } (main 에서 지정)
     this.setTrack(track);
   }
@@ -141,6 +149,80 @@ export class Items {
     for (const m of this.missiles) this.scene.remove(m.obj);
     this.missiles = [];
     for (const b of this.boxes) b.hiddenUntil = 0;
+    this.clearCloud();
+    for (const b of this.bolts || []) this.scene.remove(b.obj);
+    this.bolts = [];
+  }
+
+  // ---------- 번개 구름 ----------
+  /** holder 머리 위에 먹구름 (ms 뒤 번개). 이미 있으면 주인/시간만 바꿈 */
+  setCloud(holder, ms, now) {
+    if (!this.cloud) {
+      const obj = new THREE.Group();
+      const mat = new THREE.MeshStandardMaterial({ color: 0x3b3f4a, roughness: 1, emissive: 0xfff3a0, emissiveIntensity: 0 });
+      for (const [x, y, z, r] of [[0, 0, 0, 1.6], [1.4, -0.2, 0.3, 1.2], [-1.4, -0.1, -0.2, 1.25], [0.5, 0.6, -0.6, 1.1], [-0.6, 0.5, 0.7, 1.0], [0, -0.4, 1.1, 0.9]]) {
+        const m = new THREE.Mesh(CLOUD_GEO, mat);
+        m.position.set(x, y, z); m.scale.setScalar(r);
+        obj.add(m);
+      }
+      this.scene.add(obj);
+      this.cloud = { obj, mat };
+    }
+    Object.assign(this.cloud, { holder, endAt: now + ms, total: ms });
+  }
+
+  clearCloud() {
+    if (!this.cloud) return;
+    this.scene.remove(this.cloud.obj);
+    this.cloud.mat.dispose();
+    this.cloud = null;
+  }
+
+  /** 번개! 구름에서 holder 카트로 지그재그 번개 + 불꽃 */
+  strike(holder) {
+    const pos = this.getPos(holder);
+    const from = this.cloud?.obj.position.clone();
+    this.clearCloud();
+    if (!pos) return;
+    const y0 = (pos.y ?? 0) + 0.8, top = from ? from.y : y0 + 7;
+    const pts = [];
+    for (let k = 0; k <= 6; k++) {
+      const u = k / 6, j = k === 0 || k === 6 ? 0 : 1;
+      pts.push(new THREE.Vector3(pos.x + (Math.random() - 0.5) * 1.6 * j, top + (y0 - top) * u, pos.z + (Math.random() - 0.5) * 1.6 * j));
+    }
+    const geo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0), 24, 0.32, 5, false);
+    const obj = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xfffbe0, transparent: true, opacity: 1 }));
+    this.scene.add(obj);
+    this.bolts.push({ obj, t: 0 });
+    for (let k = 0; k < 50; k++) {
+      const a = Math.random() * Math.PI * 2, sp = 3 + Math.random() * 9;
+      this.fx.glow.emit(pos.x, y0, pos.z, Math.cos(a) * sp, 2 + Math.random() * 8, Math.sin(a) * sp, 0.3 + Math.random() * 0.3, 0.9, 0.12, 1, 0.95, 0.5, 1, 2);
+    }
+    this.onStrike?.(pos.x, pos.z);
+  }
+
+  updateCloud(dt, now, time) {
+    for (const b of this.bolts) { b.t += dt; b.obj.material.opacity = Math.max(0, 1 - b.t / 0.6) * (0.6 + Math.random() * 0.4); }
+    this.bolts = this.bolts.filter((b) => {
+      if (b.t < 0.6) return true;
+      this.scene.remove(b.obj); b.obj.geometry.dispose(); b.obj.material.dispose();
+      return false;
+    });
+    const c = this.cloud;
+    if (!c) return;
+    const pos = this.getPos(c.holder);
+    if (!pos) return;
+    const o = c.obj.position;
+    const target = new THREE.Vector3(pos.x, (pos.y ?? 0) + 6.5 + Math.sin(time * 2) * 0.25, pos.z);
+    // 처음 나타날 땐 바로, 옮겨갈 땐 휙 날아가듯
+    if (o.lengthSq() === 0) o.copy(target); else o.lerp(target, 1 - Math.exp(-dt * 9));
+    c.obj.rotation.y += dt * 0.5;
+    // 남은 시간이 줄수록 번쩍임이 잦아짐
+    const left = Math.max(0, c.endAt - now) / c.total;
+    const rate = 1.5 + (1 - left) * 9;
+    c.mat.emissiveIntensity = Math.sin(time * rate * Math.PI) > 0.7 ? 0.9 : 0.05;
+    // 빗방울
+    if (Math.random() < dt * 25) this.fx.glow.emit(o.x + (Math.random() - 0.5) * 3, o.y - 1, o.z + (Math.random() - 0.5) * 3, 0, -14, 0, 0.35, 0.25, 0.06, 0.6, 0.75, 1, 0.8, 2);
   }
 
   // ---------- 아이템 박스 ----------
@@ -403,6 +485,7 @@ export class Items {
     }
     this.bombs = this.bombs.filter((b) => !b.landed || now - b.landT < 1500);
     this.updateMissiles(dt, now);
+    this.updateCloud(dt, now, time);
 
     for (const s of this.splashes) {
       s.t += dt;

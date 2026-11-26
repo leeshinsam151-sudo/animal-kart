@@ -4,7 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Track, ZONES, zoneWeights, blendColor, trackById, DEFAULT_TRACK } from './track.js';
 import { Items, SPLASH_RADIUS, MISSILE_HIT_RADIUS, MISSILE_HIT_HEIGHT, MISSILE_LOCK_RANGE } from './items.js';
 import { createKart, createNameTag, CHARACTER_IDS } from './kart.js';
-import { CarController, TOP_SPEED, SPIN_TIME, BLAST_TIME, BUMP_K } from './physics.js';
+import { CarController, TOP_SPEED, SPIN_TIME, BLAST_TIME, BUMP_K, SHIELD_TIME, MAGNET_TIME } from './physics.js';
 import { KartFx, Snow } from './effects.js';
 import { Net } from './net.js';
 import { AudioSys } from './audio.js';
@@ -15,7 +15,8 @@ const SEND_INTERVAL = 50;   // 내 상태 전송 주기 (ms)
 // 원격 카트 보간: 서버 시각 기준 정렬 + 흔들림에 맞춘 지연 자동 조절 + 짧은 예측 (interp.js)
 const netClock = new NetClock();
 const SHOW_INDEX = 30;      // 차고(로비) 화면에서 카트를 세워둘 트랙 위치
-const FLAG_DRIFT = 1, FLAG_BOOST = 2, FLAG_SPIN = 4, FLAG_TRAP = 8, FLAG_BLAST = 16;
+const FLAG_DRIFT = 1, FLAG_BOOST = 2, FLAG_SPIN = 4, FLAG_TRAP = 8, FLAG_BLAST = 16, FLAG_SHIELD = 32, FLAG_MAGNET = 64;
+const MAGNET_RANGE = 200; // m - 자석은 이 거리 안의 바로 앞 카트에게 끌려감
 const ITEM_ROLL_TIME = 0.8; // 아이템 룰렛 시간 (s)
 const MAX_HELD_ITEMS = 2;   // 아이템 최대 보관 개수
 
@@ -58,6 +59,7 @@ const items = new Items(scene, track, fx);
 net.offlineContext = { track, items };
 items.onExplosion = (x, z) => { const v = nearVol(x, z); if (v > 0.05) sound.explosion(v); };
 items.onSplash = (x, z) => { const v = nearVol(x, z); if (v > 0.05) sound.splash(v); };
+items.onStrike = (x, z) => { const v = nearVol(x, z, 200); if (v > 0.05) sound.thunder(v); };
 // 미사일 추적용: 플레이어 id → 현재 위치와 트랙 인덱스
 items.getPos = (id) => {
   if (id === game.myId && game.local) { const c = game.local.ctrl; return { x: c.x, z: c.z, y: c.y, hint: c.hint }; }
@@ -223,7 +225,7 @@ function clearRace() {
   game.local = null;
   for (const r of game.remotes.values()) disposeKart(r.kart);
   game.remotes.clear();
-  Object.assign(game, { inputEnabled: false, finished: false, finishTime: null, finishOrder: [], heldItems: [], itemRoll: 0, rollQueue: [], zoneIdx: -1 });
+  Object.assign(game, { inputEnabled: false, finished: false, finishTime: null, finishOrder: [], heldItems: [], itemRoll: 0, rollQueue: [], zoneIdx: -1, magnetTarget: null });
   items.clear();
   document.body.classList.remove('boosting');
   ui.missileWarning(false);
@@ -238,6 +240,14 @@ function setupRace(grid) {
     const ctrl = new CarController(track);
     ctrl.steerScale = steerScale;
     ctrl.onItem = () => sound.chime(); // 드리프트로 부스터 획득
+    ctrl.onShieldBreak = () => { // 방어막이 공격을 막음
+      sound.shieldBreak();
+      ui.toast('🛡️ 방어막이 막아냈다!', 1200);
+      for (let k = 0; k < 40; k++) {
+        const a = Math.random() * Math.PI * 2, e = Math.random() * Math.PI;
+        fx.glow.emit(ctrl.x + Math.cos(a) * 2.8, ctrl.y + 2 + Math.cos(e) * 2.5, ctrl.z + Math.sin(a) * 2.8, Math.cos(a) * 6, 2 + Math.random() * 4, Math.sin(a) * 6, 0.45, 0.6, 0.1, 1, 0.85, 0.35, 1, 2);
+      }
+    };
     game.lapShown = 1;
     const slot = track.gridSlot(mine.slot);
     ctrl.reset(slot.x, slot.z, slot.heading);
@@ -438,6 +448,7 @@ net
     const ids = new Set(m.bananas.map((b) => b.id));
     for (const id of [...items.bananas.keys()]) if (!ids.has(id)) items.removeBanana(id);
     for (const b of m.bananas) items.addBanana(b.id, b.x, b.z, b.owner, now - 5000);
+    if (m.cloud) items.setCloud(m.cloud.holder, m.cloud.ms, now); else items.clearCloud();
     game.finishOrder = [...m.finishOrder];
   })
   .on('reconnecting', ({ attempt, max }) => ui.toast(`📡 연결이 끊겨 재접속 중… (${attempt}/${max})`, 3000))
@@ -450,6 +461,7 @@ net
     if (r && now - (r.hitAt || 0) < BUMP_DEDUPE_MS) return;
     const mag = Math.hypot(m.ix, m.iz);
     if (!(mag > 0) || mag > 40) return;
+    passCloud(m.from, now);
     c.bump(m.ix, m.iz);
     if (r) r.bumpAt = now;
     crashFx(c.x - (m.ix / mag) * 1.4, c.y, c.z - (m.iz / mag) * 1.4, mag);
@@ -465,6 +477,17 @@ net
     if (m.target === game.myId) ui.toast('🚀 미사일이 날아옵니다!', 1500);
   })
   .on('missileGone', (m) => items.explodeMissile(m.id))
+  .on('cloud', (m) => {
+    items.setCloud(m.holder, m.ms, performance.now());
+    if (m.holder === game.myId) { sound.cloud(); ui.toast(m.passed ? '⛈️ 번개 구름이 넘어왔다! 다른 카트에 부딪혀 넘기세요' : '⛈️ 번개 구름이 따라와요! 다른 카트에 부딪혀 넘기세요', 1800); }
+    else if (m.from === game.myId) ui.toast('⛈️ 번개 구름을 넘겼다!', 1200);
+  })
+  .on('cloudStrike', (m) => {
+    items.strike(m.holder);
+    const c = game.local?.ctrl;
+    if (m.holder === game.myId && c && !game.finished && c.spinOut()) { sound.slip(); ui.toast('⚡ 번개에 맞았다!', 1200); }
+  })
+  .on('cloudGone', () => items.clearCloud())
   .on('bomb', (m) => {
     // 내가 던진 건 이미 로컬에서 날아가는 중
     if (m.owner !== game.myId) items.throwBomb(m, performance.now());
@@ -563,8 +586,10 @@ function updateRemotes(now, dt) {
       cheer: game.finishOrder.includes(id),
       spinAngle: r.spinAngle, trapped,
       blast: r.blastT > 0 ? Math.min(1, r.blastT / BLAST_TIME) : 0,
+      shielded: !!(r.fl & FLAG_SHIELD),
     });
     fx.emitFor(r.kart, { drifting, boosting: !!(r.fl & FLAG_BOOST), charge: r.driftT, speed: sp }, dt);
+    if (r.fl & FLAG_MAGNET) magnetFx(r.x, r.y || 0, r.z, r.ry, dt);
   }
 }
 
@@ -661,6 +686,9 @@ function frame(now) {
     const c = L.ctrl;
     const inp = game.finished ? COAST_INPUT : game.inputEnabled ? readInput() : NO_INPUT;
     const impactBefore = c.impact;
+    // 자석: 고른 카트의 지금 위치를 따라감 (그 카트가 없어지면 가속만)
+    const mt = c.magnetTime > 0 && game.magnetTarget != null ? game.remotes.get(game.magnetTarget) : null;
+    c.magnetTarget = mt ? { x: mt.x, z: mt.z } : null;
     c.update(dt, inp);
     if (c.impact - impactBefore > 0.15) sound.thud(Math.min(1, (c.impact - impactBefore) * 1.5)); // 벽 충돌·착지 소리
     collideKarts(c, now);
@@ -688,11 +716,15 @@ function frame(now) {
       spinAngle: c.spinTime > 0 ? (1 - c.spinTime / SPIN_TIME) * Math.PI * 4 : 0,
       trapped: c.trapTime > 0,
       blast: c.blastTime > 0 ? 1 - c.blastTime / BLAST_TIME : 0,
+      shielded: c.shieldTime > 0,
     });
+    if (c.magnetTime > 0) magnetFx(c.x, c.y, c.z, c.heading, dt);
 
     // 미사일 경고 (나를 노리는 미사일이 있으면 경고 + 삐삐)
     const warned = items.targeting(game.myId) && !game.finished;
     ui.missileWarning(warned);
+    const cloud = items.cloud;
+    ui.cloudWarning(cloud && cloud.holder === game.myId && !game.finished ? Math.max(0, (cloud.endAt - now) / 1000) : null);
     if (warned && game.time - (game.lastBeep || 0) > 0.35) { sound.beep(); game.lastBeep = game.time; }
 
     if (game.inputEnabled && !game.finished) updateLocalItems(c, inp, now, dt);
@@ -772,6 +804,23 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+/** 번개 구름을 들고 있는데 다른 카트에 닿았으면 그 카트에게 넘김 (서버가 최종 판정) */
+function passCloud(toId, now) {
+  if (items.cloud?.holder !== game.myId || now - (game.cloudPassAt || 0) < 700) return;
+  game.cloudPassAt = now;
+  net.send({ type: 'cloudPass', to: toId });
+}
+
+/** 자석: 카트 앞쪽으로 빨려 들어가는 파란 불꽃 */
+function magnetFx(x, y, z, yaw, dt) {
+  const fx_ = Math.sin(yaw), fz_ = Math.cos(yaw);
+  for (let k = 0; k < Math.ceil(dt * 50); k++) {
+    const a = Math.random() * Math.PI * 2, r = 2 + Math.random() * 2;
+    const px = x + fx_ * 4 + Math.cos(a) * r, pz = z + fz_ * 4 + Math.sin(a) * r;
+    fx.glow.emit(px, y + 1 + Math.random() * 1.5, pz, (x + fx_ * 2 - px) * 4, 0, (z + fz_ * 2 - pz) * 4, 0.25, 0.4, 0.1, 0.35, 0.7, 1, 1, 1);
+  }
+}
+
 // ---------------- 카트끼리 충돌 ----------------
 const BUMP_DEDUPE_MS = 300; // 같은 충돌을 내 쪽 감지 + 상대 알림으로 두 번 적용하지 않도록
 
@@ -780,6 +829,7 @@ function collideKarts(c, now) {
   for (const [id, r] of game.remotes) {
     const recentBump = now - (r.bumpAt || 0) < BUMP_DEDUPE_MS; // 상대 알림으로 이미 튕겼으면 겹침만 풀기
     const hit = c.collideWith(r.x, r.z, r.vx, r.vz, r.y, !recentBump);
+    if (hit) passCloud(id, now);
     if (!hit || recentBump) continue;
     r.hitAt = now;
     crashFx(c.x - hit.nx * 1.4, c.y, c.z - hit.nz * 1.4, hit.speed);
@@ -819,13 +869,13 @@ function crashFx(x, y, z, speed, distant = false) {
 // ---------------- 아이템 ----------------
 /** 순위에 따라 아이템 확률 조절: 1등은 바나나(방어), 뒤쪽일수록 미사일/물폭탄(공격), 게이지 충전은 모두에게 */
 const ITEM_ODDS = {
-  //          바나나 물폭탄 미사일 게이지충전
-  solo:     [0.3, 0.25, 0.25, 0.2],  // 혼자 연습
-  first:    [0.55, 0.25, 0, 0.2],    // 1등: 미사일 없음
-  middle:   [0.25, 0.3, 0.25, 0.2],
-  last:     [0.1, 0.3, 0.35, 0.25],  // 꼴등
+  //          바나나 물폭탄 미사일 게이지 방어막 자석 번개구름
+  solo:     [0.2, 0.15, 0.15, 0.15, 0.15, 0.1, 0.1],   // 혼자 연습
+  first:    [0.4, 0.2, 0, 0.15, 0.25, 0, 0],          // 1등: 미사일·자석·번개 없음, 방어막 많이
+  middle:   [0.17, 0.17, 0.18, 0.12, 0.12, 0.12, 0.12],
+  last:     [0.06, 0.12, 0.22, 0.14, 0.08, 0.2, 0.18],  // 꼴등: 따라잡는 아이템 위주
 };
-const ITEM_KINDS = ['banana', 'bomb', 'missile', 'charge'];
+const ITEM_KINDS = ['banana', 'bomb', 'missile', 'charge', 'shield', 'magnet', 'cloud'];
 function rollItem() {
   const list = standings();
   const pos = list.findIndex((s) => s.me);
@@ -835,7 +885,17 @@ function rollItem() {
   return 'banana';
 }
 
-/** 미사일 목표: 바로 앞 순위 (완주한 사람 제외). 없으면 null */
+/** 자석 목표: 바로 앞 순위 카트가 MAGNET_RANGE 안이면 { id }, 아니면 null */
+function magnetTarget() {
+  const list = standings();
+  const pos = list.findIndex((s) => s.me);
+  for (let i = pos - 1; i >= 0; i--) {
+    if (list[i].finished) continue;
+    return (list[i].p - list[pos].p) * track.length <= MAGNET_RANGE ? { id: list[i].id } : null;
+  }
+  return null;
+}
+
 /** 미사일 목표: 바로 앞 순위 (완주한 사람 제외). 220m 넘게 떨어져 있으면 조준 안 함 → { id, gap } */
 function missileTarget() {
   const list = standings();
@@ -882,6 +942,19 @@ function updateLocalItems(c, inp, now, dt) {
       sound.charge();
       chargeFx(c);
       ui.toast(full ? '⚡ 게이지 가득! (부스터를 쓰면 바로 채워짐)' : '⚡ 게이지 충전! 부스터 획득 (Space)', 1500);
+    } else if (useItem === 'shield') {
+      c.shieldTime = SHIELD_TIME;
+      sound.shield();
+      ui.toast('🛡️ 방어막! 5초 동안 공격 1번을 막아요', 1500);
+    } else if (useItem === 'magnet') {
+      const aim = magnetTarget();
+      game.magnetTarget = aim?.id ?? null;
+      c.magnetTime = MAGNET_TIME;
+      sound.magnet();
+      ui.toast(aim ? `🧲 ${game.players.get(aim.id)?.name ?? ''} 에게 끌려갑니다!` : '🧲 앞에 가까운 카트가 없어서 가속만!', 1400);
+    } else if (useItem === 'cloud') {
+      net.send({ type: 'item', kind: 'cloud', x: c.x, z: c.z });
+      ui.toast('⛈️ 1등 머리 위에 번개 구름!', 1400);
     } else if (useItem === 'banana') {
       net.send({ type: 'item', kind: 'banana', x: c.x - fx_ * 3.6, z: c.z - fz_ * 3.6 });
       sound.drop();
@@ -923,7 +996,7 @@ function updateLocalItems(c, inp, now, dt) {
     if (Math.abs(m.y - (c.y + 1.2)) > MISSILE_HIT_HEIGHT) continue;
     // 프레임이 느려도 빠져나가지 않게 이번 프레임 이동 거리만큼 판정을 넓힘
     if (Math.hypot(m.x - c.x, m.z - c.z) < MISSILE_HIT_RADIUS + Math.abs(c.vF) * dt) {
-      c.blast();
+      c.blast(); // 방어막이 있으면 막힘 (미사일은 어쨌든 터짐)
       net.send({ type: 'missileHit', id: m.id });
       items.explodeMissile(m.id);
       break;
@@ -933,8 +1006,7 @@ function updateLocalItems(c, inp, now, dt) {
   // 바나나 밟기
   const banana = c.air ? null : items.touchBanana(c.x, c.z, game.myId, now);
   if (banana != null) {
-    c.spinOut();
-    sound.slip();
+    if (c.spinOut()) sound.slip();
     items.removeBanana(banana);
     net.send({ type: 'hitBanana', id: banana });
   }
@@ -945,8 +1017,7 @@ function updateLocalItems(c, inp, now, dt) {
     if (b.owner === game.myId || b.hitMe) continue;
     if (Math.hypot(c.x - b.ex, c.z - b.ez) < SPLASH_RADIUS) {
       b.hitMe = true;
-      c.trap();
-      sound.trapped();
+      if (c.trap()) sound.trapped();
     }
   }
 }
@@ -996,7 +1067,8 @@ function updateAtmosphere(dt) {
 function sendState(now) {
   const c = game.local.ctrl;
   game.lastSend = now;
-  const fl = (c.drifting ? FLAG_DRIFT : 0) | (c.boosting ? FLAG_BOOST : 0) | (c.spinTime > 0 ? FLAG_SPIN : 0) | (c.trapTime > 0 ? FLAG_TRAP : 0) | (c.blastTime > 0 ? FLAG_BLAST : 0);
+  const fl = (c.drifting ? FLAG_DRIFT : 0) | (c.boosting ? FLAG_BOOST : 0) | (c.spinTime > 0 ? FLAG_SPIN : 0) | (c.trapTime > 0 ? FLAG_TRAP : 0) | (c.blastTime > 0 ? FLAG_BLAST : 0)
+    | (c.shieldTime > 0 ? FLAG_SHIELD : 0) | (c.magnetTime > 0 ? FLAG_MAGNET : 0);
   net.send({ type: 'state', x: c.x, z: c.z, y: c.y, ry: c.heading, sp: c.vF, st: c.steer, p: c.progress, fl });
 }
 

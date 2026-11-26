@@ -31,6 +31,11 @@ const GAUGE_RATE = 0.5;     // 드리프트 약 2초 = 부스터 1개
 export const SPIN_TIME = 1.2;   // 바나나 스핀 시간
 export const TRAP_TIME = 1.8;   // 물폭탄 갇힘 시간
 export const BLAST_TIME = 1.5;  // 미사일 피격 (공중 회전) 시간
+export const SHIELD_TIME = 5;   // 방어막 유지 시간
+export const MAGNET_TIME = 3;   // 자석 유지 시간
+const MAGNET_MAX = 68;          // 자석으로 끌려갈 때 최고속도 (보통 56, 부스터 74)
+const MAGNET_ACCEL = 30;
+const MAGNET_TURN = 1.6;        // rad/s - 목표 쪽으로 방향이 끌려가는 세기
 
 function track_groundAt(track, loc) { return track.groundAt(loc.f, loc.lateral); }
 
@@ -64,6 +69,10 @@ export class CarController {
     this.spinTime = 0;
     this.trapTime = 0;
     this.blastTime = 0;
+    this.shieldTime = 0;   // 방어막 (피격 1번 막음)
+    this.magnetTime = 0;   // 자석 (앞 카트에게 끌려감)
+    this.magnetTarget = null; // { x, z } - main 이 매 프레임 지정 (없으면 가속만)
+    this.onShieldBreak = null;
     this.yawRate = 0;      // 현재 회전 속도 (부드럽게 변함)
     this.steerScale = 1;   // 조향 감도 (설정에서 0.6~1.4)
     // 높이 / 점프
@@ -79,7 +88,7 @@ export class CarController {
   }
 
   reset(x, z, heading) {
-    Object.assign(this, { x, z, heading, vx: 0, vz: 0, vF: 0, steer: 0, impact: 0, gauge: 0, items: 0, boostTime: 0, drifting: false, spinTime: 0, trapTime: 0, blastTime: 0, yawRate: 0 });
+    Object.assign(this, { x, z, heading, vx: 0, vz: 0, vF: 0, steer: 0, impact: 0, gauge: 0, items: 0, boostTime: 0, drifting: false, spinTime: 0, trapTime: 0, blastTime: 0, yawRate: 0, shieldTime: 0, magnetTime: 0, magnetTarget: null });
     const loc = this.track.locate(x, z);
     this.hint = loc.index;
     this.lastF = loc.f;
@@ -112,30 +121,49 @@ export class CarController {
   get boosting() { return this.boostTime > 0; }
   get stunned() { return this.spinTime > 0 || this.trapTime > 0 || this.blastTime > 0; }
 
-  /** 바나나: 빙글빙글 돌며 감속 */
+  /** 방어막이 있으면 공격 1번을 막고 사라짐 → true */
+  absorb() {
+    if (this.shieldTime <= 0) return false;
+    this.shieldTime = 0;
+    this.onShieldBreak?.();
+    return true;
+  }
+
+  // 피격 함수는 실제로 맞았으면 true, 방어막에 막혔거나 이미 다른 피격 중이면 false
+
+  /** 바나나 / 번개: 빙글빙글 돌며 감속 */
   spinOut() {
-    if (this.trapTime > 0 || this.blastTime > 0) return;
+    if (this.trapTime > 0 || this.blastTime > 0) return false;
+    if (this.absorb()) return false;
     this.spinTime = SPIN_TIME;
     this.boostTime = 0;
+    this.magnetTime = 0;
     this.drifting = false;
+    return true;
   }
 
   /** 미사일: 폭발로 공중에 떠서 한 바퀴 돌고 거의 정지 */
   blast() {
+    if (this.absorb()) return false;
     this.blastTime = BLAST_TIME;
     this.spinTime = 0;
     this.trapTime = 0;
     this.boostTime = 0;
+    this.magnetTime = 0;
     this.drifting = false;
+    return true;
   }
 
   /** 물폭탄: 물방울에 갇혀 정지 */
   trap() {
-    if (this.blastTime > 0) return;
+    if (this.blastTime > 0) return false;
+    if (this.absorb()) return false;
     this.trapTime = TRAP_TIME;
     this.spinTime = 0;
     this.boostTime = 0;
+    this.magnetTime = 0;
     this.drifting = false;
+    return true;
   }
 
   update(dt, inp) {
@@ -166,6 +194,17 @@ export class CarController {
     this.prevBoostKey = inp.boost;
     const boosting = this.boostTime > 0;
     this.boostTime = Math.max(0, this.boostTime - dt);
+    this.shieldTime = Math.max(0, this.shieldTime - dt);
+    // 자석: 앞 카트 쪽으로 방향이 끌려가고 최고속도↑ (목표가 없으면 가속만)
+    const magnet = this.magnetTime > 0 && !this.stunned;
+    this.magnetTime = Math.max(0, this.magnetTime - dt);
+    if (magnet && this.magnetTarget) {
+      const want = Math.atan2(this.magnetTarget.x - this.x, this.magnetTarget.z - this.z);
+      let d = want - this.heading;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      if (Math.abs(d) < 1.4) this.heading += Math.max(-MAGNET_TURN * dt, Math.min(MAGNET_TURN * dt, d)); // 뒤쪽으로는 안 끌림
+    }
 
     // 드리프트: Shift + 방향키로 진입, 진입 방향 고정. Shift 를 떼거나 느려지면 종료
     if (!this.drifting && !this.air && inp.drift && steerIn !== 0 && vF > 14) {
@@ -176,12 +215,14 @@ export class CarController {
     }
     this.driftTime = this.drifting ? this.driftTime + dt : 0;
 
-    const maxF = boosting ? (this.offroad ? BOOST_OFFROAD_MAX : BOOST_MAX) : this.offroad ? zone.offroadMax : MAX_SPEED;
+    let maxF = boosting ? (this.offroad ? BOOST_OFFROAD_MAX : BOOST_MAX) : this.offroad ? zone.offroadMax : MAX_SPEED;
+    if (magnet) maxF = Math.max(maxF, MAGNET_MAX);
 
     // 가속/제동
     let a = 0;
     if (inp.throttle || boosting) a += vF < -0.5 ? BRAKE : ACCEL * Math.max(0, 1 - (vF / maxF) ** 2);
     if (boosting && vF < maxF) a += BOOST_ACCEL;
+    if (magnet && !boosting && vF < maxF) a += MAGNET_ACCEL;
     if (inp.brake && !boosting) a -= vF > 0.5 ? BRAKE : vF > -REVERSE_MAX ? REVERSE_ACCEL : 0;
     if (this.air) a *= 0.25;                        // 공중에선 바퀴가 안 닿음
     else a -= SLOPE_FORCE * this.slope;             // 오르막 감속, 내리막 가속

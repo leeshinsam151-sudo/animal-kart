@@ -22,6 +22,8 @@ const MAX_RACE_MS = 10 * 60 * 1000;
 const MAX_BANANAS = 30;
 const HEARTBEAT_MS = 5000;       // 연결 확인 주기 (응답 없으면 다음 주기에 끊음)
 const RESUME_MS = 20000;         // 레이스 중 끊긴 사람의 자리를 남겨두는 시간
+const CLOUD_MS = 5000;           // 번개 구름: 이 시간 뒤 번개
+const CLOUD_PASS_MIN_MS = 1500;  // 구름을 넘겨받은 사람에게 최소한 남겨주는 시간
 const CHARACTERS = ['panda', 'cat', 'dog', 'lion', 'tiger', 'eagle'];
 const COLORS = ['#e63946', '#1d8cf8', '#ffb703', '#2ec4b6', '#9b5de5', '#f15bb5', '#fb8500', '#8ac926'];
 
@@ -63,6 +65,7 @@ function syncMsg(room) {
     type: 'sync',
     bananas: [...room.bananas].map(([id, b]) => ({ id, x: b.x, z: b.z, owner: b.owner })),
     finishOrder: room.finishOrder,
+    cloud: room.cloud ? { holder: room.cloud.holder, ms: Math.max(0, room.cloud.until - Date.now()) } : null,
   };
 }
 
@@ -71,6 +74,7 @@ function removePlayer(room, player) {
   clearTimeout(player.resumeTimer);
   if (room.players.get(player.id) !== player) return;
   room.players.delete(player.id);
+  dropCloud(room, player.id);
   if (room.players.size === 0) {
     clearTimers(room);
     rooms.delete(room.code);
@@ -100,6 +104,27 @@ function lobbyMsg(room) {
 function clearTimers(room) {
   room.timers.forEach(clearTimeout);
   room.timers = [];
+  clearTimeout(room.cloud?.timer);
+  room.cloud = null;
+}
+
+// ---------- 번개 구름 (방에 하나, 서버가 주인과 번개 시각을 정함) ----------
+function setCloud(room, holder, ms, extra = {}) {
+  clearTimeout(room.cloud?.timer);
+  const timer = setTimeout(() => {
+    if (room.cloud?.timer !== timer) return;
+    room.cloud = null;
+    broadcast(room, { type: 'cloudStrike', holder });
+  }, ms);
+  room.cloud = { holder, until: Date.now() + ms, timer, passedAt: Date.now() };
+  broadcast(room, { type: 'cloud', holder, ms, ...extra });
+}
+
+function dropCloud(room, playerId) {
+  if (room.cloud?.holder !== playerId) return;
+  clearTimeout(room.cloud.timer);
+  room.cloud = null;
+  broadcast(room, { type: 'cloudGone' });
 }
 
 function startRace(room) {
@@ -237,7 +262,7 @@ wss.on('connection', (ws) => {
       case 'state': {
         if (!player.racing) break;
         const n = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : 0);
-        player.s = [n(msg.x), n(msg.z), n(msg.ry), n(msg.sp), n(msg.st), (msg.fl | 0) & 31]; // fl: 1=드리프트, 2=부스터, 4=스핀, 8=물방울, 16=미사일 피격
+        player.s = [n(msg.x), n(msg.z), n(msg.ry), n(msg.sp), n(msg.st), (msg.fl | 0) & 127]; // fl: 1=드리프트, 2=부스터, 4=스핀, 8=물방울, 16=미사일 피격, 32=방어막, 64=자석
         player.y = n(msg.y);
         if (!player.finished) player.progress = Number.isFinite(msg.p) ? Math.round(msg.p * 10000) / 10000 : 0;
         break;
@@ -252,6 +277,7 @@ wss.on('connection', (ws) => {
         player.finishTime = Date.now() - room.raceStart;
         player.progress = room.laps + 1 - room.finishOrder.length * 0.001;
         room.finishOrder.push(player.id);
+        dropCloud(room, player.id); // 완주하면 구름은 사라짐
         broadcast(room, { type: 'finished', id: player.id, name: player.name, time: player.finishTime, place: room.finishOrder.length });
         if (room.finishOrder.length === 1) room.timers.push(setTimeout(() => endRace(room), AFTER_FIRST_FINISH_MS));
         checkRaceEnd(room);
@@ -292,6 +318,10 @@ wss.on('connection', (ws) => {
           broadcast(room, { type: 'missile', id, owner: player.id, target, x, z, idx: msg.idx | 0, lat: Number(msg.lat) || 0, cid: msg.cid });
         } else if (msg.kind === 'bomb') {
           broadcast(room, { type: 'bomb', id, owner: player.id, x, z, idx: msg.idx | 0, lat: Number(msg.lat) || 0, cid: msg.cid });
+        } else if (msg.kind === 'cloud') {
+          // 1등(쓴 사람이 1등이면 2등) 머리 위로
+          const list = [...room.players.values()].filter((p) => p.racing && !p.finished && p !== player).sort((a, b) => b.progress - a.progress);
+          if (list.length) setCloud(room, list[0].id, CLOUD_MS, { owner: player.id });
         }
         break;
       }
@@ -305,6 +335,14 @@ wss.on('connection', (ws) => {
         const ix = Number(msg.ix), iz = Number(msg.iz);
         if (!target?.racing || !Number.isFinite(ix) || !Number.isFinite(iz) || Math.hypot(ix, iz) > 40) break;
         send(target.ws, { type: 'bump', from: player.id, ix, iz });
+        break;
+      }
+
+      case 'cloudPass': { // 구름 주인이 다른 카트에 부딪힘 → 구름이 그 사람에게
+        const c = room.cloud, to = room.players.get(msg.to);
+        if (room.phase !== 'racing' || !c || c.holder !== player.id || !to?.racing || to.finished || to === player) break;
+        if (Date.now() - c.passedAt < 600) break; // 주고받기가 너무 빠르면 무시
+        setCloud(room, to.id, Math.max(CLOUD_PASS_MIN_MS, c.until - Date.now()), { from: player.id, passed: true });
         break;
       }
 
