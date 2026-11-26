@@ -8,61 +8,105 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
-const KEY = 'racer-quality';
+const KEY = 'racer-quality2'; // (예전 '높음/낮음' 저장값 대신 새로 '자동'이 기본)
 
-/** 저장된 품질, 없으면 기기에 맞게 (터치 기기·작은 화면은 낮음). ?quality=low|high 로 강제 가능 */
+const MODES = ['auto', 'high', 'low'];
+/** 저장된 설정 (기본: 자동). ?quality=auto|high|low 로 강제 가능 */
 export function initialQuality() {
   const q = new URLSearchParams(location.search).get('quality');
-  if (q === 'low' || q === 'high') return q;
-  try { const s = localStorage.getItem(KEY); if (s === 'low' || s === 'high') return s; } catch {}
-  const weak = matchMedia('(pointer: coarse)').matches || Math.min(innerWidth, innerHeight) < 600;
-  return weak ? 'low' : 'high';
+  if (MODES.includes(q)) return q;
+  try { const s = localStorage.getItem(KEY); if (MODES.includes(s)) return s; } catch {}
+  return 'auto';
 }
+const weakDevice = () => matchMedia('(pointer: coarse)').matches || Math.min(innerWidth, innerHeight) < 600;
+
+// 그래픽 단계 (자동 모드는 프레임이 느리면 한 단계씩 내림)
+//  0: 구석 음영 + 블룸 + MSAA (해상도 최대 1.5배)
+//  1: 블룸 + MSAA (구석 음영 끔)
+//  2: 후처리 없음, 부드러운 그림자
+//  3: 낮음 (해상도 1배, 그림자 해상도↓)
+const LEVELS = [
+  { ao: true, post: true, pr: 1.5, soft: true, shadow: 2048 },
+  { ao: false, post: true, pr: 1.5, soft: true, shadow: 2048 },
+  { ao: false, post: false, pr: 1.25, soft: true, shadow: 2048 },
+  { ao: false, post: false, pr: 1, soft: false, shadow: 1024 },
+];
 
 export class Graphics {
   constructor(renderer, scene, camera, sun) {
-    Object.assign(this, { renderer, scene, camera, sun, composer: null, quality: null });
+    Object.assign(this, { renderer, scene, camera, sun, composer: null, quality: null, level: 0, frames: [], cooldown: 0, skipNext: false });
+    // 다른 탭에 갔다 오면 그 사이 공백은 버벅임이 아님
+    document.addEventListener('visibilitychange', () => { this.frames = []; this.skipNext = true; });
   }
 
+  /** 설정: 'auto' | 'high' | 'low' */
   setQuality(q, save = true) {
     if (q === this.quality) return;
     this.quality = q;
     if (save) { try { localStorage.setItem(KEY, q); } catch {} }
-    const high = q === 'high';
+    this.frames = [];
+    this.applyLevel(q === 'high' ? 0 : q === 'low' ? 3 : weakDevice() ? 3 : 0);
+  }
+
+  /** 배경 디테일(뭉게 나무·차양 등)을 쓸지: 높음, 또는 자동 + 성능 좋은 기기 */
+  get detail() { return this.quality === 'high' || (this.quality === 'auto' && !weakDevice()); }
+
+  /**
+   * 매 프레임 호출 (ms). 자동 모드에서 최근 2초 프레임이 느리면(평균 21ms 넘게, 약 48fps 미만) 한 단계 낮춤.
+   * 탭 전환으로 생긴 공백은 무시. 한 번 낮추면 다음 2초는 판정 안 함 (새 단계가 자리 잡게)
+   */
+  tick(ms) {
+    if (this.quality !== 'auto' || this.level >= 3) return null;
+    if (this.skipNext) { this.skipNext = false; return null; } // 탭에서 돌아온 직후 첫 공백은 무시
+    this.frames.push(Math.min(ms, 1000));
+    let sum = 0;
+    for (const f of this.frames) sum += f;
+    if (sum < 2000) return null;
+    const avg = sum / this.frames.length;
+    this.frames = [];
+    if (this.cooldown > 0) { this.cooldown--; return null; }
+    if (avg > 21) { this.applyLevel(this.level + 1); this.cooldown = 1; return this.level; }
+    return null;
+  }
+
+  applyLevel(level) {
+    this.level = level;
+    const L = LEVELS[level], high = L.post;
     const r = this.renderer;
     // 밝은 곳도 색이 바래지 않는 톤매핑 (ACES 는 흰색 쪽으로 날아가서 뿌옇게 보였음)
     r.toneMapping = THREE.NeutralToneMapping;
     r.toneMappingExposure = 0.92;
-    r.setPixelRatio(Math.min(devicePixelRatio, high ? 2 : 1.25));
-    r.shadowMap.type = high ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
-    const size = high ? 2048 : 1024;
+    r.setPixelRatio(Math.min(devicePixelRatio, L.pr));
+    r.shadowMap.type = L.soft ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    const size = L.shadow;
     if (this.sun.shadow.mapSize.x !== size) {
       this.sun.shadow.mapSize.set(size, size);
       this.sun.shadow.map?.dispose();
       this.sun.shadow.map = null; // 다음 렌더에서 새 크기로 만듦
     }
-    this.sun.shadow.radius = high ? 3 : 1;
+    this.sun.shadow.radius = L.soft ? 3 : 1;
     r.shadowMap.needsUpdate = true;
     this.composer?.dispose?.();
     this.composer = null;
-    if (high) this.buildComposer();
+    if (high) this.buildComposer(L.ao);
   }
 
-  buildComposer() {
+  buildComposer(withAO) {
     const r = this.renderer, w = innerWidth, h = innerHeight;
     // MSAA 가 되는 렌더 타깃 (후처리를 쓰면 캔버스 기본 안티에일리어싱이 안 먹음)
     const rt = new THREE.WebGLRenderTarget(w * r.getPixelRatio(), h * r.getPixelRatio(), { type: THREE.HalfFloatType, samples: 4 });
     const c = new EffectComposer(r, rt);
     c.addPass(new RenderPass(this.scene, this.camera));
-    const ao = new GTAOPass(this.scene, this.camera, w, h);
-    ao.blendIntensity = 0.7;
-    ao.updateGtaoMaterial({ radius: 1.6, distanceExponent: 1.4, thickness: 1.2, scale: 1.1, samples: 12 });
-    ao.updatePdMaterial({ radius: 6, rings: 2, samples: 12 });
-    c.addPass(ao);
+    if (withAO) {
+      const ao = new GTAOPass(this.scene, this.camera, w, h);
+      ao.blendIntensity = 0.7;
+      ao.updateGtaoMaterial({ radius: 1.6, distanceExponent: 1.4, thickness: 1.2, scale: 1.1, samples: 8 });
+      ao.updatePdMaterial({ radius: 6, rings: 2, samples: 8 });
+      c.addPass(ao);
+    }
     c.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.18, 0.4, 1.8)); // 부스터 불꽃·번개처럼 아주 밝은 것만 살짝 번짐 (흰 바닥은 안 번짐)
     c.addPass(new OutputPass());
     this.composer = c;
-    this.ao = ao;
   }
 
   setSize(w, h) {

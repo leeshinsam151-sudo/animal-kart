@@ -128,6 +128,16 @@ export class Items {
     this.setTrack(track);
   }
 
+  /** 셰이더 미리 컴파일용: 아이템 모양을 하나씩 (처음 쓸 때 화면이 순간 멈추지 않게) */
+  warmupGroup() {
+    const g = new THREE.Group();
+    g.add(makeBanana(), makeBomb(), makeMissile());
+    g.add(new THREE.Mesh(CLOUD_GEO, new THREE.MeshStandardMaterial({ color: 0x3b3f4a, roughness: 1, emissive: 0xfff3a0, emissiveIntensity: 0 })));
+    g.add(new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({ color: 0x6cc6ff, transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide })));
+    g.add(new THREE.Mesh(CLOUD_GEO, new THREE.MeshBasicMaterial({ color: 0xfffbe0, transparent: true, opacity: 1 })));
+    return g;
+  }
+
   /** 트랙이 바뀌면 깔린 아이템을 치우고 아이템 박스를 새 트랙에 맞춰 다시 배치 */
   setTrack(track) {
     if (this.boxMesh) { this.clear(); this.boxMesh.removeFromParent(); this.boxMesh.dispose(); }

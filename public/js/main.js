@@ -61,7 +61,24 @@ const gfx = new Graphics(renderer, scene, camera, sun);
 gfx.setQuality(initialQuality(), false);
 const sky = createSky(scene);
 sky.uniforms.sunDir.value.copy(SUN_OFFSET).normalize();
-const trackOpts = () => ({ detail: gfx.quality === 'high' });
+const trackOpts = () => ({ detail: gfx.detail });
+
+/**
+ * 셰이더 미리 컴파일: 숨겨진 것(방어막·물방울 등)과 아이템 모양까지 한 번에 준비 →
+ * 처음 나올 때 화면이 순간 멈추는 것(버벅임) 방지. 컴파일은 백그라운드로 진행(compileAsync)
+ */
+function warmUp() {
+  const g = items.warmupGroup();
+  g.position.set(0, -500, 0);
+  scene.add(g);
+  const hidden = [];
+  scene.traverse((o) => { if (!o.visible) { hidden.push(o); o.visible = true; } });
+  let job;
+  try { job = renderer.compileAsync(scene, camera); } catch {}
+  for (const o of hidden) o.visible = false;
+  // 재질은 버리지 않음 → 컴파일된 셰이더가 캐시에 남아 실제 아이템이 바로 씀
+  Promise.resolve(job).catch(() => {}).finally(() => scene.remove(g));
+}
 
 let track = new Track(scene, renderer, trackById(DEFAULT_TRACK), trackOpts()); // 로비에서 방장이 고른 트랙으로 바뀜 (loadTrack)
 const ui = new UI(track);
@@ -94,6 +111,7 @@ function loadTrack(id, force = false) {
   net.offlineContext.track = track; // 연습 모드 봇도 새 트랙에서 달림
   if (window.__dbg) window.__dbg.track = track;
   game.zoneIdx = -1;
+  warmUp();
   return true;
 }
 
@@ -150,6 +168,7 @@ steerInput.addEventListener('input', () => {
 // 그래픽 품질: 렌더링은 바로, 배경 디테일은 트랙을 다시 만들어야 해서 레이스 중이 아닐 때 바로 / 레이스 중이면 다음 트랙부터
 const qualitySel = document.getElementById('quality');
 qualitySel.value = gfx.quality;
+warmUp();
 qualitySel.addEventListener('change', () => {
   gfx.setQuality(qualitySel.value);
   const racing = game.local && (game.phase === 'racing' || game.phase === 'countdown');
@@ -416,6 +435,7 @@ net
     game.laps = m.laps;
     loadTrack(m.track);
     setupRace(m.grid);
+    warmUp(); // 카트·아이템 셰이더 미리 준비 (카운트다운 동안)
     // 트랙 이름 배너
     const def = track.def, zn = ZONES[track.zone[0]];
     ui.zoneBanner({ emoji: def.emoji, name: def.name, suffix: '', label: def.label, map: def.theme ? zn.map : '#ffffff' });
@@ -700,6 +720,8 @@ function updateCamera(dt) {
 let last = performance.now();
 function frame(now) {
   const dt = Math.min((now - last) / 1000, 0.05);
+  // 자동 그래픽: 계속 느리면 한 단계씩 낮춤
+  if (gfx.tick(now - last) != null) ui.toast('⚙️ 버벅임을 줄이려고 그래픽을 자동으로 낮췄어요', 2200);
   last = now;
   game.time += dt;
 
